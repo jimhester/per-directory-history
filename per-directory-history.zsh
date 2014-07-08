@@ -30,7 +30,7 @@
 #
 ################################################################################
 #
-# Copyright (c) 2012 Jim Hester
+# Copyright (c) 2014 Jim Hester
 #
 # This software is provided 'as-is', without any express or implied warranty. 
 # In no event will the authors be held liable for any damages arising from the
@@ -57,6 +57,7 @@
 #-------------------------------------------------------------------------------
 
 [[ -z $HISTORY_BASE ]] && HISTORY_BASE="$HOME/.directory_history"
+[[ -z $PER_DIRECTORY_HISTORY_TOGGLE ]] && PER_DIRECTORY_HISTORY_TOGGLE='^G'
 
 #-------------------------------------------------------------------------------
 # toggle global/directory history used for searching - ctrl-G by default
@@ -76,7 +77,7 @@ function per-directory-history-toggle-history() {
 
 autoload per-directory-history-toggle-history
 zle -N per-directory-history-toggle-history
-bindkey '^G' per-directory-history-toggle-history
+bindkey $PER_DIRECTORY_HISTORY_TOGGLE per-directory-history-toggle-history
 
 #-------------------------------------------------------------------------------
 # implementation details
