@@ -141,8 +141,8 @@ function _per-directory-history-set-global-history() {
 
 
 #add functions to the exec list for chpwd and zshaddhistory
-chpwd_functions=(${chpwd_functions[@]} "_per-directory-history-change-directory")
-zshaddhistory_functions=(${zshaddhistory_functions[@]} "_per-directory-history-addhistory")
+add-zsh-hook chpwd _per-directory-history-change-directory
+add-zsh-hook zshaddhistory _per-directory-history-addhistory
 
 #start in directory mode
 mkdir -p ${_per_directory_history_directory:h}
