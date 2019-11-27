@@ -57,6 +57,7 @@
 #-------------------------------------------------------------------------------
 
 [[ -z $HISTORY_BASE ]] && HISTORY_BASE="$HOME/.directory_history"
+[[ -z $HISTORY_START_WITH_GLOBAL ]] && HISTORY_START_WITH_GLOBAL=false
 [[ -z $PER_DIRECTORY_HISTORY_TOGGLE ]] && PER_DIRECTORY_HISTORY_TOGGLE='^G'
 
 #-------------------------------------------------------------------------------
@@ -114,6 +115,13 @@ function _per-directory-history-addhistory() {
       true
   else
       print -Sr -- "${1%%$'\n'}"
+      # instantly write history if set options require it.
+      if [[ -o share_history ]] || \
+         [[ -o inc_append_history ]] || \
+         [[ -o inc_append_history_time ]]; then
+          fc -AI $HISTFILE
+          fc -AI $_per_directory_history_directory
+      fi
       fc -p $_per_directory_history_directory
   fi
 }
@@ -152,5 +160,5 @@ add-zsh-hook zshaddhistory _per-directory-history-addhistory
 
 #start in directory mode
 mkdir -p ${_per_directory_history_directory:h}
-_per_directory_history_is_global=true
-_per-directory-history-set-directory-history
+_per_directory_history_is_global=$HISTORY_START_WITH_GLOBAL
+[[ $_per_directory_history_is_global == true ]] && _per-directory-history-set-global-history || _per-directory-history-set-directory-history
