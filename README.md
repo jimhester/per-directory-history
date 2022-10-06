@@ -34,13 +34,14 @@ Usage
 Configuration
 -------------------------------------------------------------------------------
 
-* HISTORY_BASE a global variable that defines the base directory in which the 
+* `HISTORY_BASE` a global variable that defines the base directory in which the 
   directory histories are stored
-* PER_DIRECTORY_AGGREGATED_PATH if exist then fixed history file path is used:
+* `PER_DIRECTORY_AGGREGATED_PATH` if exist then fixed history file path is used:
   `$HISTORY_BASE/$PER_DIRECTORY_AGGREGATED_PATH`
-  Good if you would like to keep your history aggregated for multiple directories 
+  
+  Good if you would like to keep your history aggregated for multiple directories
   (use `direnv` to set that ENV depended on the directory)
-* per-directory-history-toggle-history is the function to toggle the history
+* `per-directory-history-toggle-history` is the function to toggle the history
 
 -------------------------------------------------------------------------------
 History
