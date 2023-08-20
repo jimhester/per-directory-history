@@ -56,7 +56,7 @@
 # configuration, the base under which the directory histories are stored
 #-------------------------------------------------------------------------------
 
-[[ -z $HISTORY_BASE ]] && HISTORY_BASE="$HOME/.directory_history"
+[[ -z $HISTORY_BASE ]] && HISTORY_BASE="$HOME/.config/directory_history"
 [[ -z $HISTORY_START_WITH_GLOBAL ]] && HISTORY_START_WITH_GLOBAL=false
 [[ -z $PER_DIRECTORY_HISTORY_TOGGLE ]] && PER_DIRECTORY_HISTORY_TOGGLE='^G'
 
@@ -86,17 +86,30 @@ bindkey -M vicmd $PER_DIRECTORY_HISTORY_TOGGLE per-directory-history-toggle-hist
 #-------------------------------------------------------------------------------
 # implementation details
 #-------------------------------------------------------------------------------
-
-_per_directory_history_directory="$HISTORY_BASE${PWD:A}/history"
+function load_dir_history_path() {
+    if [[ -z $PER_DIRECTORY_AGGREGATED_PATH ]]
+    then
+      _per_directory_history_directory="$HISTORY_BASE${PWD:A}/history"
+    else
+      _per_directory_history_directory="$HISTORY_BASE/$PER_DIRECTORY_AGGREGATED_PATH"
+    fi
+}
+load_dir_history_path
 
 function _per-directory-history-change-directory() {
-  _per_directory_history_directory="$HISTORY_BASE${PWD:A}/history"
+  load_dir_history_path
   mkdir -p ${_per_directory_history_directory:h}
   if [[ $_per_directory_history_is_global == false ]]; then
     #save to the global history
     fc -AI $HISTFILE
+
     #save history to previous file
-    local prev="$HISTORY_BASE${OLDPWD:A}/history"
+    if [[ -z $PER_DIRECTORY_AGGREGATED_PATH ]]
+    then
+      local prev="$HISTORY_BASE${OLDPWD:A}/history"
+    else
+      local prev=$_per_directory_history_directory
+    fi
     mkdir -p ${prev:h}
     fc -AI $prev
 
