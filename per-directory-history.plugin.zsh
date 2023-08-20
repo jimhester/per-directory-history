@@ -1,1 +1,1 @@
-per-directory-history.zsh
+source ${0:h}/per-directory-history.zsh
