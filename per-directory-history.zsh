@@ -93,14 +93,14 @@ function _per-directory-history-change-directory() {
   _per_directory_history_directory="$HISTORY_BASE${PWD:A}/history"
   mkdir -p ${_per_directory_history_directory:h}
   if [[ $_per_directory_history_is_global == false ]]; then
-    #save to the global history
+    # save to the global history
     fc -AI $HISTFILE
-    #save history to previous file
+    # save history to previous file
     local prev="$HISTORY_BASE${OLDPWD:A}/history"
     mkdir -p ${prev:h}
     fc -AI $prev
 
-    #discard previous directory's history
+    # discard previous directory's history
     local original_histsize=$HISTSIZE
     HISTSIZE=0
     HISTSIZE=$original_histsize
@@ -115,18 +115,11 @@ function _per-directory-history-change-directory() {
 function _per-directory-history-addhistory() {
   # respect hist_ignore_space
   if [[ -o hist_ignore_space ]] && [[ "$1" == \ * ]]; then
-      true
-  else
-      print -Sr -- "${1%%$'\n'}"
-      # instantly write history if set options require it.
-      if [[ -o share_history ]] || \
-         [[ -o inc_append_history ]] || \
-         [[ -o inc_append_history_time ]]; then
-          fc -AI $HISTFILE
-          fc -AI $_per_directory_history_directory
-      fi
-      fc -p $_per_directory_history_directory
+    return
   fi
+  # Can't write to history (print -S) from addhistory,
+	# save command to be added later from preexec hook
+	_per_directory_history_pending_cmd="${1%%$'\n'}"
 }
 
 function _per-directory-history-precmd() {
@@ -163,13 +156,34 @@ function _per-directory-history-set-global-history() {
   fi
 }
 
+function _per-directory-history-preexec() {
+	if [[ -v _per_directory_history_pending_cmd ]]
+	then
+		local fn
+		if $_per_directory_history_is_global
+		then
+			mkdir -p ${_per_directory_history_path:h}
+			fn=$_per_directory_history_path
+		else
+			fn=$_per_directory_history_main_histfile
+		fi
+		fc -p
+		print -Sr -- $_per_directory_history_pending_cmd
+		SAVEHIST=1
+		fc -A $fn
+		fc -P
+		unset _per_directory_history_pending_cmd
+	fi
+}
+
 mkdir -p ${_per_directory_history_directory:h}
 
-#add functions to the exec list for chpwd and zshaddhistory
+# add functions to the exec list for chpwd and zshaddhistory
 autoload -U add-zsh-hook
 add-zsh-hook chpwd _per-directory-history-change-directory
 add-zsh-hook zshaddhistory _per-directory-history-addhistory
 add-zsh-hook precmd _per-directory-history-precmd
+add-zsh-hook preexec _per-directory-history-preexec
 
 # set initialized flag to false
 _per_directory_history_initialized=false
