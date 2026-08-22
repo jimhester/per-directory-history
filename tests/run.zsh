@@ -169,6 +169,16 @@ function local_history_file() {
   REPLY="$root/directory_history${directory:A}/history"
 }
 
+function zpty_send_command() {
+  local name=$1
+  local prompt=$2
+  local command=$3
+  local output
+
+  zpty -w "$name" "$command" || return 1
+  zpty -r -m "$name" output "*${prompt}*"
+}
+
 function test_plugin_entrypoint_loads() {
   local root=$TEST_ROOT/plugin-entrypoint
   local working_directory=$root/work
@@ -238,7 +248,7 @@ function test_corrupt_history_does_not_block_commands() {
   assert_file_contains_text "$root/corrupt.stdout" 'second-command-after-corruption'
 }
 
-function test_concurrent_shells_share_history() {
+function test_concurrent_shells_persist_history() {
   local root=$TEST_ROOT/concurrent-shells
   local working_directory=$root/work
   local ready=$root/shell-a-ready
@@ -246,7 +256,6 @@ function test_concurrent_shells_share_history() {
   mkdir -p -- "$working_directory"
 
   run_session "$root" "$working_directory" shell-a \
-    'setopt SHARE_HISTORY' \
     'print -r -- shell-a-before-marker' \
     "touch ${(q)ready}" \
     "while [[ ! -e ${(q)release} ]]; do sleep 0.01; done" \
@@ -266,7 +275,6 @@ function test_concurrent_shells_share_history() {
   fi
 
   run_session "$root" "$working_directory" shell-b \
-    'setopt SHARE_HISTORY' \
     'print -r -- shell-b-marker' \
     "touch ${(q)release}" || return 1
   wait "$shell_a_pid" || return 1
@@ -281,6 +289,52 @@ function test_concurrent_shells_share_history() {
     assert_file_contains_text "$file" 'shell-b-marker' || return 1
     assert_file_contains_text "$file" 'shell-a-after-marker' || return 1
   done
+}
+
+function test_concurrent_shells_share_live_history() {
+  local root=$TEST_ROOT/live-shared-history
+  local working_directory=$root/work
+  local shell_a_ready=$root/shell-a-ready
+  local release_shell_a=$root/release-shell-a
+  local snapshot_complete=$root/snapshot-complete
+  local snapshot=$root/shell-a-active-history
+  mkdir -p -- "$working_directory"
+
+  run_session "$root" "$working_directory" live-shell-a \
+    'unsetopt INC_APPEND_HISTORY; setopt SHARE_HISTORY' \
+    'print -r -- live-shell-a-marker' \
+    "touch ${(q)shell_a_ready}" \
+    "while [[ ! -e ${(q)release_shell_a} ]]; do sleep 0.01; done" \
+    "fc -l 1 > ${(q)snapshot}" \
+    "touch ${(q)snapshot_complete}" &
+  local shell_a_pid=$!
+
+  local -i attempts=0
+  while [[ ! -e $shell_a_ready && $attempts -lt 500 ]]; do
+    sleep 0.01
+    (( ++attempts ))
+  done
+  if [[ ! -e $shell_a_ready ]]; then
+    touch "$release_shell_a"
+    wait "$shell_a_pid"
+    fail 'first shared-history shell did not reach its synchronization point'
+    return 1
+  fi
+
+  run_session "$root" "$working_directory" live-shell-b \
+    'unsetopt INC_APPEND_HISTORY; setopt SHARE_HISTORY' \
+    'print -r -- live-shell-b-marker' \
+    "touch ${(q)release_shell_a}" \
+    "for attempt in {1..500}; do [[ -e ${(q)snapshot_complete} ]] && break; sleep 0.01; done" || return 1
+  wait "$shell_a_pid" || return 1
+
+  local directory_history
+  local_history_file "$root" "$working_directory"
+  directory_history=$REPLY
+
+  assert_file_contains_text "$root/global_history" 'live-shell-b-marker' || return 1
+  assert_file_contains_text "$directory_history" 'live-shell-b-marker' || return 1
+  assert_file_contains_text "$snapshot" 'live-shell-b-marker'
 }
 
 function test_history_options_and_whitespace() {
@@ -370,19 +424,42 @@ function test_directory_named_history_has_its_own_history() {
 function test_repeated_toggles_do_not_duplicate_history() {
   local root=$TEST_ROOT/repeated-toggles
   local working_directory=$root/work
-  local toggle_command='per-directory-history-toggle-history >/dev/null 2>&1'
+  local home=$root/home
+  local prompt=PDH_TEST_READY
+  local pty_name=pdh-toggle-shell
   local snapshot=$root/active-history
-  mkdir -p -- "$working_directory"
+  local pty_output
+  mkdir -p -- "$working_directory" "$home"
+  zmodload zsh/zpty || return 1
 
-  run_session "$root" "$working_directory" toggles \
-    'print -r -- unique-toggle-marker' \
-    "$toggle_command" \
-    "$toggle_command" \
-    "$toggle_command" \
-    "$toggle_command" \
-    "fc -l 1 > ${(q)snapshot}" || return 1
+  {
+    zpty "$pty_name" env TERM=dumb HOME=${(q)home} PS1=${(q)prompt} zsh -dfi || return 1
+    zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
 
-  assert_text_line_count "$snapshot" "$toggle_command" 4
+    zpty_send_command "$pty_name" "$prompt" "HISTFILE=${(q)root}/global_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTSIZE=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'SAVEHIST=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" "HISTORY_BASE=${(q)root}/directory_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTORY_START_WITH_GLOBAL=false' || return 1
+    zpty_send_command "$pty_name" "$prompt" "PER_DIRECTORY_HISTORY_TOGGLE='^G'" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'bindkey -e' || return 1
+    zpty_send_command "$pty_name" "$prompt" "cd -- ${(q)working_directory}" || return 1
+    zpty_send_command "$pty_name" "$prompt" "source ${(q)PLUGIN}" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- seeded-toggle-marker' || return 1
+
+    repeat 4; do
+      zpty -w -n "$pty_name" $'\C-G' || return 1
+      zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
+    done
+
+    zpty_send_command "$pty_name" "$prompt" "fc -l 1 > ${(q)snapshot}" || return 1
+    zpty -w "$pty_name" exit
+  } always {
+    zpty -d "$pty_name" 2>/dev/null
+  }
+
+  assert_text_line_count "$snapshot" 'seeded-toggle-marker' 1
 }
 
 function print_captured_output() {
@@ -426,7 +503,7 @@ function run_expected_failure() {
 
 run_test 'loads through the .plugin.zsh entrypoint' test_plugin_entrypoint_loads
 run_test 'persists global and per-directory history' test_global_and_directory_persistence
-run_test 'shares global and local history between concurrent shells' test_concurrent_shells_share_history
+run_test 'persists history from concurrent shells' test_concurrent_shells_persist_history
 run_test 'honors history options and preserves whitespace' test_history_options_and_whitespace
 run_test 'keeps the shell usable with corrupt local history input' test_corrupt_history_does_not_block_commands
 
@@ -443,9 +520,13 @@ run_expected_failure \
   test_directory_named_history_has_its_own_history \
   'the parent history file occupies the path needed for the child history directory'
 run_expected_failure \
+  'makes new history immediately visible to concurrent shells' \
+  test_concurrent_shells_share_live_history \
+  'SHARE_HISTORY does not import another live shell history until reload or toggle'
+run_expected_failure \
   'does not duplicate commands across repeated local/global toggles' \
   test_repeated_toggles_do_not_duplicate_history \
-  'executed toggles are duplicated in the active history buffer'
+  'ZLE toggle invocations duplicate existing entries in the active history buffer'
 
 print
 print -r -- "$tests_passed passed, $tests_xfailed known failures, $tests_failed failed, $tests_xpassed unexpected passes"
