@@ -39,6 +39,19 @@ Configuration
 * per-directory-history-toggle-history is the function to toggle the history
 
 -------------------------------------------------------------------------------
+Testing
+-------------------------------------------------------------------------------
+
+The integration suite requires only zsh and runs each scenario with isolated
+history files and a real interactive shell:
+
+    zsh tests/run.zsh
+
+Tests marked `XFAIL` document reproduced correctness bugs. They do not fail CI,
+but an unexpected pass does, so a bug fix must promote the corresponding test
+to a normal passing test.
+
+-------------------------------------------------------------------------------
 History
 -------------------------------------------------------------------------------
 
@@ -52,4 +65,3 @@ implementation is by [Jim Hester][5] in September 2012.
 [4]: https://github.com/robbyrussell/oh-my-zsh
 [5]: http://jimhester.com
 [6]: http://github.com/jimhester/per-directory-history
-
