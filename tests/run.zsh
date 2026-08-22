@@ -178,6 +178,23 @@ function encoded_history_file() {
   REPLY="$root/directory_history/.history/$encoded"
 }
 
+function history_option_command() {
+  local option=$1
+
+  case $option in
+    NONE)
+      REPLY='unsetopt APPEND_HISTORY INC_APPEND_HISTORY INC_APPEND_HISTORY_TIME SHARE_HISTORY'
+      ;;
+    APPEND_HISTORY|INC_APPEND_HISTORY|INC_APPEND_HISTORY_TIME|SHARE_HISTORY)
+      REPLY="unsetopt APPEND_HISTORY INC_APPEND_HISTORY INC_APPEND_HISTORY_TIME SHARE_HISTORY; setopt $option"
+      ;;
+    *)
+      fail "unknown history option: $option"
+      return 1
+      ;;
+  esac
+}
+
 function zpty_send_command() {
   local name=$1
   local prompt=$2
@@ -351,9 +368,12 @@ function test_concurrent_shells_share_live_history() {
   legacy_history_file "$root" "$working_directory"
   directory_history=$REPLY
 
-  assert_file_contains_text "$root/global_history" 'live-shell-b-marker' || return 1
-  assert_file_contains_text "$directory_history" 'live-shell-b-marker' || return 1
-  assert_file_contains_text "$snapshot" 'live-shell-b-marker'
+  local file
+  for file in "$root/global_history" "$directory_history"; do
+    assert_text_line_count "$file" 'live-shell-a-marker' 1 || return 1
+    assert_text_line_count "$file" 'live-shell-b-marker' 1 || return 1
+  done
+  assert_text_line_count "$snapshot" 'live-shell-b-marker' 1
 }
 
 function test_history_options_and_whitespace() {
@@ -625,6 +645,83 @@ function test_encoded_history_handles_spaces_and_percent() {
   assert_file_not_contains_text "$child_history" 'spaces-percent-parent-marker'
 }
 
+function run_exit_history_safety_case() {
+  local option=$1
+  local start_global=$2
+  local case_name=${option:l}-${start_global:l}
+  local root=$TEST_ROOT/exit-history-safety/$case_name
+  local working_directory=$root/work
+  local home=$root/home
+  local global_history=$root/global_history
+  local directory_history
+  local new_marker=issue35-new-${case_name//[^[:alnum:]]/-}
+  local option_command
+  local -i sentinel
+
+  mkdir -p -- "$working_directory" "$home"
+  legacy_history_file "$root" "$working_directory"
+  directory_history=$REPLY
+  mkdir -p -- "${directory_history:h}"
+
+  for sentinel in {1..12}; do
+    print -r -- "issue35-global-sentinel-$sentinel-end"
+  done > "$global_history"
+  for sentinel in {1..4}; do
+    print -r -- "issue35-local-sentinel-$sentinel-end"
+  done > "$directory_history"
+
+  history_option_command "$option" || return 1
+  option_command=$REPLY
+  {
+    print -r -- "PROMPT=''"
+    print -r -- "PROMPT2=''"
+    print -r -- "RPROMPT=''"
+    print -r -- "HISTFILE=${(q)global_history}"
+    print -r -- 'HISTSIZE=200'
+    print -r -- 'SAVEHIST=200'
+    print -r -- "HISTORY_BASE=${(q)root}/directory_history"
+    print -r -- "HISTORY_START_WITH_GLOBAL=$start_global"
+    print -r -- "PER_DIRECTORY_HISTORY_TOGGLE='^G'"
+    print -r -- "$option_command"
+    print -r -- 'setopt EXTENDED_HISTORY HIST_SAVE_BY_COPY'
+    print -r -- "cd -- ${(q)working_directory}"
+    print -r -- "source ${(q)PLUGIN}"
+  } > "$home/.zshrc"
+
+  {
+    print -r -- "print -r -- $new_marker"
+    print -r -- 'exit'
+  } | env TERM=dumb HOME="$home" ZDOTDIR="$home" zsh -di \
+      > "$root/session.stdout" 2> "$root/session.stderr" || return 1
+
+  for sentinel in {1..12}; do
+    assert_text_line_count \
+      "$global_history" "issue35-global-sentinel-$sentinel-end" 1 || return 1
+  done
+  for sentinel in {1..4}; do
+    assert_text_line_count \
+      "$directory_history" "issue35-local-sentinel-$sentinel-end" 1 || return 1
+  done
+  assert_file_not_contains_text "$global_history" 'issue35-local-sentinel-' || return 1
+  assert_file_not_contains_text "$directory_history" 'issue35-global-sentinel-' || return 1
+  assert_text_line_count "$global_history" "$new_marker" 1 || return 1
+  assert_text_line_count "$directory_history" "$new_marker" 1
+}
+
+function test_exit_preserves_and_mirrors_history_in_all_modes() {
+  local option
+  local start_global
+  local -i failures=0
+
+  for option in NONE APPEND_HISTORY INC_APPEND_HISTORY \
+      INC_APPEND_HISTORY_TIME SHARE_HISTORY; do
+    for start_global in false true; do
+      run_exit_history_safety_case "$option" "$start_global" || (( ++failures ))
+    done
+  done
+  (( failures == 0 ))
+}
+
 function run_repeated_toggle_case() {
   local option=$1
   local start_global=$2
@@ -639,24 +736,8 @@ function run_repeated_toggle_case() {
   local pty_output
   local option_command
 
-  case $option in
-    INC_APPEND_HISTORY)
-      option_command='setopt INC_APPEND_HISTORY'
-      ;;
-    SHARE_HISTORY)
-      option_command='setopt SHARE_HISTORY'
-      ;;
-    INC_APPEND_HISTORY_TIME)
-      option_command='setopt INC_APPEND_HISTORY_TIME'
-      ;;
-    APPEND_HISTORY)
-      option_command='setopt APPEND_HISTORY'
-      ;;
-    *)
-      fail "unknown history option: $option"
-      return 1
-      ;;
-  esac
+  history_option_command "$option" || return 1
+  option_command=$REPLY
 
   mkdir -p -- "$working_directory" "$home"
   zmodload zsh/zpty || return 1
@@ -711,7 +792,8 @@ function test_repeated_toggles_do_not_duplicate_history() {
   local option
   local start_global
 
-  for option in INC_APPEND_HISTORY SHARE_HISTORY INC_APPEND_HISTORY_TIME APPEND_HISTORY; do
+  for option in NONE APPEND_HISTORY INC_APPEND_HISTORY \
+      INC_APPEND_HISTORY_TIME SHARE_HISTORY; do
     for start_global in false true; do
       run_repeated_toggle_case "$option" "$start_global" || return 1
     done
@@ -759,6 +841,9 @@ function run_expected_failure() {
 
 run_test 'loads through the .plugin.zsh entrypoint' test_plugin_entrypoint_loads
 run_test 'persists global and per-directory history' test_global_and_directory_persistence
+run_test \
+  'preserves and mirrors history on exit in every persistence mode' \
+  test_exit_preserves_and_mirrors_history_in_all_modes
 run_test 'persists history from concurrent shells' test_concurrent_shells_persist_history
 run_test 'honors history options and preserves whitespace' test_history_options_and_whitespace
 run_test 'keeps the shell usable with corrupt local history input' test_corrupt_history_does_not_block_commands
@@ -787,10 +872,9 @@ run_test \
 run_test \
   'encodes spaces and percent signs safely' \
   test_encoded_history_handles_spaces_and_percent
-run_expected_failure \
+run_test \
   'makes new history immediately visible to concurrent shells' \
-  test_concurrent_shells_share_live_history \
-  'SHARE_HISTORY does not import another live shell history until reload or toggle'
+  test_concurrent_shells_share_live_history
 run_test \
   'does not duplicate commands across repeated local/global toggles' \
   test_repeated_toggles_do_not_duplicate_history

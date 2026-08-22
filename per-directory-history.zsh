@@ -66,12 +66,12 @@
 
 function per-directory-history-toggle-history() {
   if [[ $_per_directory_history_is_global == true ]]; then
-    _per-directory-history-set-directory-history
+    _per-directory-history-set-directory-history || return 1
     _per_directory_history_is_global=false
     zle -I
     echo "using local history"
   else
-    _per-directory-history-set-global-history
+    _per-directory-history-set-global-history || return 1
     _per_directory_history_is_global=true
     zle -I
     echo "using global history"
@@ -144,6 +144,8 @@ _per_directory_history_directory=$REPLY
 _per_directory_history_global_history="$HISTFILE"
 _per_directory_history_context_active=false
 _per_directory_history_active_history="$HISTFILE"
+typeset -gi _per_directory_history_active_histsize=$HISTSIZE
+typeset -gi _per_directory_history_active_savehist=$SAVEHIST
 typeset -ga _per_directory_history_pending_commands
 
 function _per-directory-history-append-pending() {
@@ -155,19 +157,25 @@ function _per-directory-history-append-pending() {
   # Build a temporary history context so only the pending commands are marked
   # as new for this append.  Clearing HISTFILE afterwards prevents the
   # automatic pop from rewriting the destination.
-  fc -pa "$target" "$HISTSIZE" "$SAVEHIST"
+  fc -pa "$target" \
+    "$_per_directory_history_active_histsize" \
+    "$_per_directory_history_active_savehist" || return 1
   for line in "${_per_directory_history_pending_commands[@]}"; do
     print -Sr -- "$line"
   done
-  fc -AI "$target"
+  local -i append_status=0
+  fc -AI "$target" || append_status=$?
   HISTFILE=
   SAVEHIST=0
+  return $append_status
 }
 
 function _per-directory-history-switch-context() {
   local target=$1
   local original_histsize=$HISTSIZE
   local original_savehist=$SAVEHIST
+  _per_directory_history_active_histsize=$original_histsize
+  _per_directory_history_active_savehist=$original_savehist
 
   if [[ $_per_directory_history_context_active == true ]]; then
     # Only append entries created in this context.  Suppress fc -P's normal
@@ -180,7 +188,7 @@ function _per-directory-history-switch-context() {
             $target != $_per_directory_history_global_history ]]; then
         inactive_history=$_per_directory_history_global_history
       fi
-      _per-directory-history-append-pending "$inactive_history"
+      _per-directory-history-append-pending "$inactive_history" || return 1
       _per_directory_history_pending_commands=()
     fi
     HISTFILE=
@@ -210,6 +218,11 @@ function _per-directory-history-change-directory() {
 }
 
 function _per-directory-history-addhistory() {
+  # Keep the active context's limits available after zsh saves and pops that
+  # context on exit, restoring the protected base context with SAVEHIST=0.
+  _per_directory_history_active_histsize=$HISTSIZE
+  _per_directory_history_active_savehist=$SAVEHIST
+
   # respect hist_ignore_space
   if [[ -o hist_ignore_space ]] && [[ "$1" == \ * ]]; then
       true
@@ -221,9 +234,9 @@ function _per-directory-history-addhistory() {
       else
         inactive_history=$_per_directory_history_global_history
       fi
-      # instantly write history if set options require it.
-      if [[ -o append_history &&
-            ! -o share_history &&
+      # Incremental modes write both contexts now.  Otherwise retain a copy
+      # for the inactive context until the next switch or normal shell exit.
+      if [[ ! -o share_history &&
             ! -o inc_append_history &&
             ! -o inc_append_history_time ]]; then
         _per_directory_history_pending_commands+=("${1%%$'\n'}")
@@ -237,16 +250,18 @@ function _per-directory-history-addhistory() {
 }
 
 function _per-directory-history-exit() {
-  if [[ $_per_directory_history_context_active == true ]]; then
-    fc -AI "$_per_directory_history_active_history"
-    if (( $#_per_directory_history_pending_commands )); then
-      if [[ $_per_directory_history_is_global == true ]]; then
-        _per-directory-history-append-pending "$_per_directory_history_directory"
-      else
-        _per-directory-history-append-pending "$_per_directory_history_global_history"
-      fi
-      _per_directory_history_pending_commands=()
+  # zsh has already saved and popped the active fc -p context by zshexit, so
+  # only the pending mirror to the inactive history remains to be written.
+  if [[ $_per_directory_history_context_active == true ]] &&
+      (( $#_per_directory_history_pending_commands )); then
+    local inactive_history
+    if [[ $_per_directory_history_is_global == true ]]; then
+      inactive_history=$_per_directory_history_directory
+    else
+      inactive_history=$_per_directory_history_global_history
     fi
+    _per-directory-history-append-pending "$inactive_history" || return 1
+    _per_directory_history_pending_commands=()
   fi
 }
 
@@ -261,6 +276,12 @@ function _per-directory-history-precmd() {
       _per-directory-history-set-directory-history
       _per_directory_history_is_global=false
     fi
+  elif [[ -o share_history ]]; then
+    # History contexts created with fc -p do not reliably resume zsh's
+    # automatic SHARE_HISTORY import.  Incrementally read the active file at
+    # each prompt so commands from other live shells become visible without a
+    # toggle or reload.  -I imports only events not already in this context.
+    fc -RI "$HISTFILE"
   fi
 }
 
