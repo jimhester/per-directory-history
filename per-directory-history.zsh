@@ -147,27 +147,73 @@ _per_directory_history_active_history="$HISTFILE"
 typeset -gi _per_directory_history_active_histsize=$HISTSIZE
 typeset -gi _per_directory_history_active_savehist=$SAVEHIST
 typeset -ga _per_directory_history_pending_commands
+typeset -ga _per_directory_history_pending_histories
 
 function _per-directory-history-append-pending() {
   local target=$1
+  local preserve_existing=${2:-false}
   local line
+  local -i index
+  local -a append_commands
+  local -a remaining_commands
+  local -a remaining_histories
 
-  (( $#_per_directory_history_pending_commands )) || return 0
-
-  # Build a temporary history context so only the pending commands are marked
-  # as new for this append.  Clearing HISTFILE afterwards prevents the
-  # automatic pop from rewriting the destination.
-  fc -pa "$target" \
-    "$_per_directory_history_active_histsize" \
-    "$_per_directory_history_active_savehist" || return 1
-  for line in "${_per_directory_history_pending_commands[@]}"; do
-    print -Sr -- "$line"
+  for (( index = 1; index <= $#_per_directory_history_pending_commands; ++index )); do
+    if [[ $_per_directory_history_pending_histories[$index] == $target ]]; then
+      append_commands+=("$_per_directory_history_pending_commands[$index]")
+    else
+      remaining_commands+=("$_per_directory_history_pending_commands[$index]")
+      remaining_histories+=("$_per_directory_history_pending_histories[$index]")
+    fi
   done
-  local -i append_status=0
-  fc -AI "$target" || append_status=$?
-  HISTFILE=
-  SAVEHIST=0
+  (( $#append_commands )) || return 0
+
+  local -i context_histsize=$_per_directory_history_active_histsize
+  local -i context_savehist=$_per_directory_history_active_savehist
+  if [[ $preserve_existing == true ]]; then
+    # No hook runs after every possible command form (for example,
+    # SAVEHIST=...; exit).  Avoid trimming the destination with a stale limit
+    # during the final mirror.  A later active context can apply configured
+    # trimming without risking existing entries during this append.
+    context_histsize=2147483647
+    context_savehist=2147483647
+  fi
+
+  # Isolate the temporary context because some fc errors unwind the current
+  # hook before ordinary status handling can run.  A failed append then exits
+  # only this worker, leaving the parent context and pending arrays intact.
+  local worker_result
+  worker_result=$(
+    fc -p "$target" "$context_histsize" "$context_savehist" || exit 1
+    for line in "${append_commands[@]}"; do
+      print -Sr -- "$line"
+    done
+    fc -AI "$target"
+    local -i worker_status=$?
+    HISTFILE=
+    SAVEHIST=0
+    (( worker_status == 0 )) && print -r -- success
+  )
+  local -i append_status=1
+  [[ $worker_result == success ]] && append_status=0
+  if (( append_status == 0 )); then
+    _per_directory_history_pending_commands=("${remaining_commands[@]}")
+    _per_directory_history_pending_histories=("${remaining_histories[@]}")
+  fi
   return $append_status
+}
+
+function _per-directory-history-flush-pending() {
+  local preserve_existing=${1:-false}
+  local target
+  local -a targets=("${(u)_per_directory_history_pending_histories[@]}")
+  local -i failures=0
+
+  for target in "${targets[@]}"; do
+    _per-directory-history-append-pending \
+      "$target" "$preserve_existing" || (( ++failures ))
+  done
+  (( failures == 0 ))
 }
 
 function _per-directory-history-switch-context() {
@@ -183,13 +229,9 @@ function _per-directory-history-switch-context() {
     # appending to.
     fc -AI "$_per_directory_history_active_history"
     if (( $#_per_directory_history_pending_commands )); then
-      local inactive_history=$target
-      if [[ $_per_directory_history_active_history != $_per_directory_history_global_history &&
-            $target != $_per_directory_history_global_history ]]; then
-        inactive_history=$_per_directory_history_global_history
-      fi
-      _per-directory-history-append-pending "$inactive_history" || return 1
-      _per_directory_history_pending_commands=()
+      # Failed mirrors stay queued with their original destination, but must
+      # not prevent the active context from following a successful chpwd.
+      _per-directory-history-flush-pending || true
     fi
     HISTFILE=
     SAVEHIST=0
@@ -209,12 +251,14 @@ function _per-directory-history-switch-context() {
 }
 
 function _per-directory-history-change-directory() {
+  local target
   _per-directory-history-file "$PWD"
-  _per_directory_history_directory=$REPLY
-  mkdir -p "${_per_directory_history_directory:h}"
+  target=$REPLY
+  mkdir -p "${target:h}"
   if [[ $_per_directory_history_is_global == false ]]; then
-    _per-directory-history-switch-context "$_per_directory_history_directory"
+    _per-directory-history-switch-context "$target"
   fi
+  _per_directory_history_directory=$target
 }
 
 function _per-directory-history-addhistory() {
@@ -240,6 +284,7 @@ function _per-directory-history-addhistory() {
             ! -o inc_append_history &&
             ! -o inc_append_history_time ]]; then
         _per_directory_history_pending_commands+=("${1%%$'\n'}")
+        _per_directory_history_pending_histories+=("$inactive_history")
       elif [[ -o share_history ]] || \
          [[ -o inc_append_history ]] || \
          [[ -o inc_append_history_time ]]; then
@@ -251,17 +296,12 @@ function _per-directory-history-addhistory() {
 
 function _per-directory-history-exit() {
   # zsh has already saved and popped the active fc -p context by zshexit, so
-  # only the pending mirror to the inactive history remains to be written.
+  # only pending mirrors to inactive histories remain to be written.  The
+  # unbounded temporary context prevents a stale pre-command limit from
+  # trimming those destinations during the final append.
   if [[ $_per_directory_history_context_active == true ]] &&
       (( $#_per_directory_history_pending_commands )); then
-    local inactive_history
-    if [[ $_per_directory_history_is_global == true ]]; then
-      inactive_history=$_per_directory_history_directory
-    else
-      inactive_history=$_per_directory_history_global_history
-    fi
-    _per-directory-history-append-pending "$inactive_history" || return 1
-    _per_directory_history_pending_commands=()
+    _per-directory-history-flush-pending true
   fi
 }
 
@@ -276,12 +316,19 @@ function _per-directory-history-precmd() {
       _per-directory-history-set-directory-history
       _per_directory_history_is_global=false
     fi
-  elif [[ -o share_history ]]; then
-    # History contexts created with fc -p do not reliably resume zsh's
-    # automatic SHARE_HISTORY import.  Incrementally read the active file at
-    # each prompt so commands from other live shells become visible without a
-    # toggle or reload.  -I imports only events not already in this context.
-    fc -RI "$HISTFILE"
+  else
+    # precmd observes limit changes made by the command that just completed;
+    # zshaddhistory runs before that command and cannot see them yet.
+    _per_directory_history_active_histsize=$HISTSIZE
+    _per_directory_history_active_savehist=$SAVEHIST
+
+    if [[ -o share_history ]]; then
+      # History contexts created with fc -p do not reliably resume zsh's
+      # automatic SHARE_HISTORY import.  Incrementally read the active file at
+      # each prompt so commands from other live shells become visible without
+      # a toggle or reload.  -I imports only events not already in this context.
+      fc -RI "$HISTFILE"
+    fi
   fi
 }
 

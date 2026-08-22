@@ -722,6 +722,172 @@ function test_exit_preserves_and_mirrors_history_in_all_modes() {
   (( failures == 0 ))
 }
 
+function run_runtime_limit_exit_case() {
+  local exit_style=$1
+  local root=$TEST_ROOT/runtime-history-limits/$exit_style
+  local working_directory=$root/work
+  local home=$root/home
+  local global_history=$root/global_history
+  local -i sentinel
+
+  mkdir -p -- "$working_directory" "$home"
+  for sentinel in {1..12}; do
+    print -r -- "runtime-limit-global-sentinel-$sentinel-end"
+  done > "$global_history"
+
+  {
+    print -r -- "PROMPT=''"
+    print -r -- "HISTFILE=${(q)global_history}"
+    print -r -- 'HISTSIZE=200'
+    print -r -- 'SAVEHIST=200'
+    print -r -- "HISTORY_BASE=${(q)root}/directory_history"
+    print -r -- 'HISTORY_START_WITH_GLOBAL=false'
+    print -r -- 'unsetopt INC_APPEND_HISTORY INC_APPEND_HISTORY_TIME SHARE_HISTORY'
+    print -r -- 'setopt APPEND_HISTORY EXTENDED_HISTORY HIST_SAVE_BY_COPY'
+    print -r -- "cd -- ${(q)working_directory}"
+    print -r -- "source ${(q)PLUGIN}"
+  } > "$home/.zshrc"
+
+  if [[ $exit_style == same-line-exit ]]; then
+    {
+      print -r -- 'SAVEHIST=4'
+      print -r -- 'SAVEHIST=200; exit'
+    } | env TERM=dumb HOME="$home" ZDOTDIR="$home" zsh -di \
+        > "$root/session.stdout" 2> "$root/session.stderr" || return 1
+  else
+    {
+      print -r -- 'SAVEHIST=4'
+      print -r -- 'SAVEHIST=200'
+    } | env TERM=dumb HOME="$home" ZDOTDIR="$home" zsh -di \
+        > "$root/session.stdout" 2> "$root/session.stderr" || return 1
+  fi
+
+  for sentinel in {1..12}; do
+    assert_text_line_count \
+      "$global_history" "runtime-limit-global-sentinel-$sentinel-end" 1 || return 1
+  done
+  assert_text_line_count "$global_history" 'SAVEHIST=200' 1
+}
+
+function test_runtime_history_limit_changes_preserve_inactive_history() {
+  run_runtime_limit_exit_case prompt-then-eof || return 1
+  run_runtime_limit_exit_case same-line-exit
+}
+
+function run_global_directory_routing_case() {
+  local option=$1
+  local root=$TEST_ROOT/global-directory-routing/${option:l}
+  local first=$root/work/first
+  local second=$root/work/second
+  local home=$root/home
+  local first_history
+  local second_history
+  local option_command
+
+  mkdir -p -- "$first" "$second" "$home"
+  legacy_history_file "$root" "$first"
+  first_history=$REPLY
+  legacy_history_file "$root" "$second"
+  second_history=$REPLY
+  mkdir -p -- "${first_history:h}" "${second_history:h}"
+  print -r -- 'routing-first-sentinel' > "$first_history"
+  print -r -- 'routing-second-sentinel' > "$second_history"
+
+  history_option_command "$option" || return 1
+  option_command=$REPLY
+  {
+    print -r -- "PROMPT=''"
+    print -r -- "HISTFILE=${(q)root}/global_history"
+    print -r -- 'HISTSIZE=200'
+    print -r -- 'SAVEHIST=200'
+    print -r -- "HISTORY_BASE=${(q)root}/directory_history"
+    print -r -- 'HISTORY_START_WITH_GLOBAL=true'
+    print -r -- "$option_command"
+    print -r -- "cd -- ${(q)first}"
+    print -r -- "source ${(q)PLUGIN}"
+  } > "$home/.zshrc"
+
+  {
+    print -r -- 'print -r -- routing-first-marker'
+    print -r -- "cd -- ${(q)second}"
+    print -r -- 'print -r -- routing-second-marker'
+    print -r -- 'exit'
+  } | env TERM=dumb HOME="$home" ZDOTDIR="$home" zsh -di \
+      > "$root/session.stdout" 2> "$root/session.stderr" || return 1
+
+  assert_text_line_count "$first_history" 'routing-first-sentinel' 1 || return 1
+  assert_text_line_count "$second_history" 'routing-second-sentinel' 1 || return 1
+  assert_text_line_count "$first_history" 'routing-first-marker' 1 || return 1
+  assert_file_not_contains_text "$first_history" 'routing-second-marker' || return 1
+  assert_text_line_count "$second_history" 'routing-second-marker' 1 || return 1
+  assert_file_not_contains_text "$second_history" 'routing-first-marker' || return 1
+  assert_text_line_count "$root/global_history" 'routing-first-marker' 1 || return 1
+  assert_text_line_count "$root/global_history" 'routing-second-marker' 1
+}
+
+function test_global_mode_routes_pending_history_by_directory() {
+  run_global_directory_routing_case NONE || return 1
+  run_global_directory_routing_case APPEND_HISTORY
+}
+
+function test_failed_mirror_does_not_block_directory_switch() {
+  local root=$TEST_ROOT/failed-mirror-directory-switch
+  local first=$root/work/first
+  local second=$root/work/second
+  local home=$root/home
+  local global_directory=$root/global-store
+  local global_history=$global_directory/history
+  local active_after_failure=$root/active-after-failure
+  local global_before_retry=$root/global-before-retry
+  local first_history
+  local second_history
+
+  mkdir -p -- "$first" "$second" "$home" "$global_directory"
+  print -r -- 'failed-mirror-global-sentinel' > "$global_history"
+  legacy_history_file "$root" "$first"
+  first_history=$REPLY
+  legacy_history_file "$root" "$second"
+  second_history=$REPLY
+
+  {
+    print -r -- "PROMPT=''"
+    print -r -- "HISTFILE=${(q)global_history}"
+    print -r -- 'HISTSIZE=200'
+    print -r -- 'SAVEHIST=200'
+    print -r -- "HISTORY_BASE=${(q)root}/directory_history"
+    print -r -- 'HISTORY_START_WITH_GLOBAL=false'
+    print -r -- 'unsetopt INC_APPEND_HISTORY INC_APPEND_HISTORY_TIME SHARE_HISTORY'
+    print -r -- 'setopt APPEND_HISTORY'
+    print -r -- "cd -- ${(q)first}"
+    print -r -- "source ${(q)PLUGIN}"
+  } > "$home/.zshrc"
+
+  {
+    print -r -- 'print -r -- failed-mirror-first-marker'
+    print -r -- "chmod 400 ${(q)global_history}"
+    print -r -- "chmod 500 ${(q)global_directory}"
+    print -r -- "cd -- ${(q)second}"
+    print -r -- "print -r -- \"\$HISTFILE\" > ${(q)active_after_failure}"
+    print -r -- "cp ${(q)global_history} ${(q)global_before_retry}"
+    print -r -- 'print -r -- failed-mirror-second-marker'
+    print -r -- "chmod 700 ${(q)global_directory}"
+    print -r -- "chmod 600 ${(q)global_history}"
+    print -r -- 'exit'
+  } | env TERM=dumb HOME="$home" ZDOTDIR="$home" zsh -di \
+      > "$root/session.stdout" 2> "$root/session.stderr" || return 1
+
+  local observed_active_history=$(<"$active_after_failure")
+  [[ $observed_active_history == $second_history ]] ||
+    fail "expected the second directory history after append failure, found: $observed_active_history" || return 1
+  assert_file_not_contains_text "$global_before_retry" 'failed-mirror-first-marker' || return 1
+  assert_text_line_count "$first_history" 'failed-mirror-first-marker' 1 || return 1
+  assert_file_not_contains_text "$first_history" 'failed-mirror-second-marker' || return 1
+  assert_text_line_count "$second_history" 'failed-mirror-second-marker' 1 || return 1
+  assert_file_not_contains_text "$second_history" 'failed-mirror-first-marker' || return 1
+  assert_text_line_count "$global_history" 'failed-mirror-first-marker' 1 || return 1
+  assert_text_line_count "$global_history" 'failed-mirror-second-marker' 1
+}
+
 function run_repeated_toggle_case() {
   local option=$1
   local start_global=$2
@@ -844,6 +1010,15 @@ run_test 'persists global and per-directory history' test_global_and_directory_p
 run_test \
   'preserves and mirrors history on exit in every persistence mode' \
   test_exit_preserves_and_mirrors_history_in_all_modes
+run_test \
+  'uses runtime history-limit changes for the final inactive mirror' \
+  test_runtime_history_limit_changes_preserve_inactive_history
+run_test \
+  'routes global-mode pending history to its original directory' \
+  test_global_mode_routes_pending_history_by_directory
+run_test \
+  'keeps directory history aligned after a mirror append failure' \
+  test_failed_mirror_does_not_block_directory_switch
 run_test 'persists history from concurrent shells' test_concurrent_shells_persist_history
 run_test 'honors history options and preserves whitespace' test_history_options_and_whitespace
 run_test 'keeps the shell usable with corrupt local history input' test_corrupt_history_does_not_block_commands
