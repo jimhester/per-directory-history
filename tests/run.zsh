@@ -163,10 +163,19 @@ function run_session() {
       > "$root/$id.stdout" 2> "$root/$id.stderr"
 }
 
-function local_history_file() {
+function legacy_history_file() {
   local root=$1
   local directory=$2
   REPLY="$root/directory_history${directory:A}/history"
+}
+
+function encoded_history_file() {
+  local root=$1
+  local directory=$2
+  local encoded=${directory:A}
+  encoded=${encoded//\%/%25}
+  encoded=${encoded//\//%2F}
+  REPLY="$root/directory_history/.history/$encoded"
 }
 
 function zpty_send_command() {
@@ -177,6 +186,16 @@ function zpty_send_command() {
 
   zpty -w "$name" "$command" || return 1
   zpty -r -m "$name" output "*${prompt}*"
+}
+
+function zpty_wait() {
+  local name=$1
+  local output
+
+  while zpty -r "$name" output; do
+    true
+  done
+  return 0
 }
 
 function test_plugin_entrypoint_loads() {
@@ -215,9 +234,9 @@ function test_global_and_directory_persistence() {
 
   local first_history
   local second_history
-  local_history_file "$root" "$first"
+  legacy_history_file "$root" "$first"
   first_history=$REPLY
-  local_history_file "$root" "$second"
+  legacy_history_file "$root" "$second"
   second_history=$REPLY
 
   assert_file_contains_text "$root/global_history" 'first-directory-marker' || return 1
@@ -235,7 +254,7 @@ function test_corrupt_history_does_not_block_commands() {
   local directory_history
   mkdir -p -- "$working_directory"
 
-  local_history_file "$root" "$working_directory"
+  legacy_history_file "$root" "$working_directory"
   directory_history=$REPLY
   mkdir -p -- "${directory_history:h}"
   printf 'before\0after\n' > "$directory_history"
@@ -280,7 +299,7 @@ function test_concurrent_shells_persist_history() {
   wait "$shell_a_pid" || return 1
 
   local directory_history
-  local_history_file "$root" "$working_directory"
+  legacy_history_file "$root" "$working_directory"
   directory_history=$REPLY
 
   local file
@@ -329,7 +348,7 @@ function test_concurrent_shells_share_live_history() {
   wait "$shell_a_pid" || return 1
 
   local directory_history
-  local_history_file "$root" "$working_directory"
+  legacy_history_file "$root" "$working_directory"
   directory_history=$REPLY
 
   assert_file_contains_text "$root/global_history" 'live-shell-b-marker' || return 1
@@ -350,7 +369,7 @@ function test_history_options_and_whitespace() {
     ' print -r -- ignored-space-marker' || return 1
 
   local directory_history
-  local_history_file "$root" "$working_directory"
+  legacy_history_file "$root" "$working_directory"
   directory_history=$REPLY
 
   local file
@@ -367,7 +386,45 @@ function test_all_keymaps_are_bound() {
 
   (
     emulate -L zsh
+    bindkey -e
+    HISTFILE=$root/global_history
+    HISTSIZE=50
+    SAVEHIST=50
+    HISTORY_BASE=$root/directory_history
+    HOME=$root/home
+    cd -- "$working_directory"
+    source "$PLUGIN"
     bindkey -v
+
+    local keymap
+    local binding
+    for keymap in viins vicmd; do
+      binding=$(bindkey -M "$keymap" "$PER_DIRECTORY_HISTORY_TOGGLE")
+      if [[ $binding != *'per-directory-history-toggle-history' ]]; then
+        fail "toggle is not bound in the active $keymap keymap after switching to vi mode: $binding"
+        return 1
+      fi
+    done
+
+    binding=$(bindkey -M emacs "$PER_DIRECTORY_HISTORY_TOGGLE")
+    if [[ $binding != *'per-directory-history-toggle-history' ]]; then
+      fail "toggle is not bound in the emacs keymap: $binding"
+      return 1
+    fi
+  )
+}
+
+function test_custom_main_keymap_receives_binding() {
+  local root=$TEST_ROOT/custom-main-keymap
+  local working_directory=$root/work
+  mkdir -p -- "$working_directory"
+
+  (
+    emulate -L zsh
+    bindkey -e
+    bindkey -N custom-main emacs
+    bindkey -A custom-main main
+    PER_DIRECTORY_HISTORY_TOGGLE='^X'
     HISTFILE=$root/global_history
     HISTSIZE=50
     SAVEHIST=50
@@ -376,29 +433,46 @@ function test_all_keymaps_are_bound() {
     cd -- "$working_directory"
     source "$PLUGIN"
 
-    local keymap
     local binding
-    for keymap in emacs viins vicmd; do
-      binding=$(bindkey -M "$keymap" "$PER_DIRECTORY_HISTORY_TOGGLE")
-      if [[ $binding != *'per-directory-history-toggle-history' ]]; then
-        fail "toggle is not bound in the $keymap keymap: $binding"
-        return 1
-      fi
-    done
+    binding=$(bindkey -M custom-main "$PER_DIRECTORY_HISTORY_TOGGLE")
+    if [[ $binding != *'per-directory-history-toggle-history' ]]; then
+      fail "toggle is not bound in the custom keymap aliased to main: $binding"
+      return 1
+    fi
   )
 }
 
-function test_later_zshaddhistory_hook_receives_one_argument() {
-  local root=$TEST_ROOT/later-hook
+function test_later_preexec_hook_receives_one_argument() {
+  local root=$TEST_ROOT/later-preexec-hook
   local working_directory=$root/work
   local captured=$root/captured-hook-arguments
-  local capture_function='function capture-hook() { print -r -- "$1" >> '"${(q)captured}"'; }'
-  mkdir -p -- "$working_directory"
+  local home=$root/home
+  local prompt=PDH_HOOK_READY
+  local pty_name=pdh-later-hook
+  local pty_output
+  mkdir -p -- "$working_directory" "$home"
+  zmodload zsh/zpty || return 1
 
-  run_session "$root" "$working_directory" later-hook \
-    "$capture_function" \
-    'add-zsh-hook zshaddhistory capture-hook' \
-    'print -r -- later-hook-marker' || return 1
+  {
+    zpty "$pty_name" env TERM=dumb HOME=${(q)home} PS1=${(q)prompt} zsh -dfi || return 1
+    zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
+
+    zpty_send_command "$pty_name" "$prompt" "HISTFILE=${(q)root}/global_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTSIZE=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'SAVEHIST=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" "HISTORY_BASE=${(q)root}/directory_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTORY_START_WITH_GLOBAL=false' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY' || return 1
+    zpty_send_command "$pty_name" "$prompt" "cd -- ${(q)working_directory}" || return 1
+    zpty_send_command "$pty_name" "$prompt" "source ${(q)PLUGIN}" || return 1
+    zpty_send_command "$pty_name" "$prompt" \
+      'function capture-preexec() { print -r -- "$1" >> '"${(q)captured}"'; }; add-zsh-hook preexec capture-preexec' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- later-hook-marker' || return 1
+    zpty -w "$pty_name" exit || return 1
+    zpty_wait "$pty_name" || return 1
+  } always {
+    zpty -d "$pty_name" 2>/dev/null
+  }
 
   assert_exact_line_count "$captured" 'print -r -- later-hook-marker' 1 || return 1
   assert_file_has_no_empty_lines "$captured"
@@ -416,19 +490,174 @@ function test_directory_named_history_has_its_own_history() {
     'print -r -- child-history-marker' || return 1
 
   local child_history
-  local_history_file "$root" "$child"
+  local parent_history
+  encoded_history_file "$root" "$child"
   child_history=$REPLY
-  assert_file_contains_text "$child_history" 'child-history-marker'
+  encoded_history_file "$root" "$parent"
+  parent_history=$REPLY
+  assert_file_contains_text "$parent_history" 'parent-history-marker' || return 1
+  assert_file_not_contains_text "$parent_history" 'child-history-marker' || return 1
+  assert_file_contains_text "$child_history" 'child-history-marker' || return 1
+  assert_file_not_contains_text "$child_history" 'parent-history-marker'
 }
 
-function test_repeated_toggles_do_not_duplicate_history() {
-  local root=$TEST_ROOT/repeated-toggles
+function test_encoded_history_stays_selected_after_collision_changes() {
+  local root=$TEST_ROOT/sticky-encoded-history
+  local parent=$root/work
+  local child=$parent/history
+  local parent_history
+  local legacy_parent_history
+  mkdir -p -- "$child"
+
+  run_session "$root" "$parent" sticky-before-removal \
+    'print -r -- sticky-before-removal-marker' || return 1
+
+  encoded_history_file "$root" "$parent"
+  parent_history=$REPLY
+  legacy_history_file "$root" "$parent"
+  legacy_parent_history=$REPLY
+  assert_file_contains_text "$parent_history" 'sticky-before-removal-marker' || return 1
+  [[ ! -e $legacy_parent_history ]] ||
+    fail "unexpected legacy history file: $legacy_parent_history" || return 1
+
+  rmdir -- "$child" || return 1
+  mkdir -p -- "${legacy_parent_history:h}"
+  print -r -- 'legacy-after-removal-marker' > "$legacy_parent_history"
+  run_session "$root" "$parent" sticky-after-removal \
+    'print -r -- sticky-after-removal-marker' || return 1
+  assert_file_contains_text "$legacy_parent_history" 'legacy-after-removal-marker' || return 1
+  assert_file_not_contains_text "$legacy_parent_history" 'sticky-after-removal-marker' || return 1
+
+  mkdir -p -- "$child"
+  run_session "$root" "$parent" sticky-after-recreation \
+    'print -r -- sticky-after-recreation-marker' || return 1
+
+  for marker in sticky-before-removal-marker sticky-after-removal-marker \
+      sticky-after-recreation-marker; do
+    assert_file_contains_text "$parent_history" "$marker" || return 1
+  done
+  assert_file_not_contains_text "$legacy_parent_history" 'sticky-after-recreation-marker'
+}
+
+function test_preexisting_legacy_history_remains_usable() {
+  local root=$TEST_ROOT/legacy-history-compatibility
+  local working_directory=$root/work
+  local legacy_history
+  local encoded_history
+  mkdir -p -- "$working_directory"
+
+  legacy_history_file "$root" "$working_directory"
+  legacy_history=$REPLY
+  mkdir -p -- "${legacy_history:h}"
+  print -r -- 'preexisting-legacy-marker' > "$legacy_history"
+
+  run_session "$root" "$working_directory" legacy-compatibility \
+    'print -r -- new-legacy-marker' || return 1
+
+  assert_file_contains_text "$legacy_history" 'preexisting-legacy-marker' || return 1
+  assert_file_contains_text "$legacy_history" 'new-legacy-marker' || return 1
+  encoded_history_file "$root" "$working_directory"
+  encoded_history=$REPLY
+  [[ ! -e $encoded_history ]] ||
+    fail "legacy history unexpectedly moved to: $encoded_history"
+}
+
+function test_nested_history_directories_use_distinct_files() {
+  local root=$TEST_ROOT/nested-history-directories
+  local parent=$root/work
+  local child=$parent/history
+  local nested=$child/history
+  local parent_history
+  local child_history
+  local nested_history
+  mkdir -p -- "$nested"
+
+  run_session "$root" "$parent" nested-history \
+    'print -r -- nested-parent-marker' \
+    "cd -- ${(q)child}" \
+    'print -r -- nested-child-marker' \
+    "cd -- ${(q)nested}" \
+    'print -r -- nested-grandchild-marker' || return 1
+
+  encoded_history_file "$root" "$parent"
+  parent_history=$REPLY
+  encoded_history_file "$root" "$child"
+  child_history=$REPLY
+  encoded_history_file "$root" "$nested"
+  nested_history=$REPLY
+
+  assert_file_contains_text "$parent_history" 'nested-parent-marker' || return 1
+  assert_file_not_contains_text "$parent_history" 'nested-child-marker' || return 1
+  assert_file_not_contains_text "$parent_history" 'nested-grandchild-marker' || return 1
+  assert_file_contains_text "$child_history" 'nested-child-marker' || return 1
+  assert_file_not_contains_text "$child_history" 'nested-parent-marker' || return 1
+  assert_file_not_contains_text "$child_history" 'nested-grandchild-marker' || return 1
+  assert_file_contains_text "$nested_history" 'nested-grandchild-marker' || return 1
+  assert_file_not_contains_text "$nested_history" 'nested-parent-marker' || return 1
+  assert_file_not_contains_text "$nested_history" 'nested-child-marker'
+}
+
+function test_encoded_history_handles_spaces_and_percent() {
+  local root=$TEST_ROOT/encoded-spaces-percent
+  local parent="$root/work % area"
+  local child="$parent/history"
+  local parent_history
+  local child_history
+  mkdir -p -- "$child"
+
+  run_session "$root" "$parent" spaces-percent \
+    'print -r -- spaces-percent-parent-marker' \
+    "cd -- ${(q)child}" \
+    'print -r -- spaces-percent-child-marker' || return 1
+
+  encoded_history_file "$root" "$parent"
+  parent_history=$REPLY
+  encoded_history_file "$root" "$child"
+  child_history=$REPLY
+  [[ $parent_history == *%25* && $child_history == *%25* ]] ||
+    fail 'encoded history path did not escape percent signs' || return 1
+  [[ $parent_history == *'work '* && $parent_history == *' area'* &&
+     $child_history == *'work '* && $child_history == *' area'* ]] ||
+    fail 'encoded history path did not preserve spaces safely' || return 1
+  assert_file_contains_text "$parent_history" 'spaces-percent-parent-marker' || return 1
+  assert_file_not_contains_text "$parent_history" 'spaces-percent-child-marker' || return 1
+  assert_file_contains_text "$child_history" 'spaces-percent-child-marker' || return 1
+  assert_file_not_contains_text "$child_history" 'spaces-percent-parent-marker'
+}
+
+function run_repeated_toggle_case() {
+  local option=$1
+  local start_global=$2
+  local case_name=${option:l}-${start_global:l}
+  local root=$TEST_ROOT/repeated-toggles/$case_name
   local working_directory=$root/work
   local home=$root/home
   local prompt=PDH_TEST_READY
-  local pty_name=pdh-toggle-shell
+  local pty_name=pdh-toggle-${case_name//[^[:alnum:]]/-}
   local snapshot=$root/active-history
+  local directory_history
   local pty_output
+  local option_command
+
+  case $option in
+    INC_APPEND_HISTORY)
+      option_command='setopt INC_APPEND_HISTORY'
+      ;;
+    SHARE_HISTORY)
+      option_command='setopt SHARE_HISTORY'
+      ;;
+    INC_APPEND_HISTORY_TIME)
+      option_command='setopt INC_APPEND_HISTORY_TIME'
+      ;;
+    APPEND_HISTORY)
+      option_command='setopt APPEND_HISTORY'
+      ;;
+    *)
+      fail "unknown history option: $option"
+      return 1
+      ;;
+  esac
+
   mkdir -p -- "$working_directory" "$home"
   zmodload zsh/zpty || return 1
 
@@ -440,26 +669,53 @@ function test_repeated_toggles_do_not_duplicate_history() {
     zpty_send_command "$pty_name" "$prompt" 'HISTSIZE=200' || return 1
     zpty_send_command "$pty_name" "$prompt" 'SAVEHIST=200' || return 1
     zpty_send_command "$pty_name" "$prompt" "HISTORY_BASE=${(q)root}/directory_history" || return 1
-    zpty_send_command "$pty_name" "$prompt" 'HISTORY_START_WITH_GLOBAL=false' || return 1
+    zpty_send_command "$pty_name" "$prompt" "HISTORY_START_WITH_GLOBAL=$start_global" || return 1
     zpty_send_command "$pty_name" "$prompt" "PER_DIRECTORY_HISTORY_TOGGLE='^G'" || return 1
-    zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY' || return 1
+    zpty_send_command "$pty_name" "$prompt" "$option_command" || return 1
     zpty_send_command "$pty_name" "$prompt" 'bindkey -e' || return 1
     zpty_send_command "$pty_name" "$prompt" "cd -- ${(q)working_directory}" || return 1
     zpty_send_command "$pty_name" "$prompt" "source ${(q)PLUGIN}" || return 1
     zpty_send_command "$pty_name" "$prompt" 'print -r -- seeded-toggle-marker' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- legitimate-duplicate-marker' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- legitimate-duplicate-marker' || return 1
+    if [[ $option == APPEND_HISTORY && $start_global == false ]]; then
+      # Pending APPEND_HISTORY entries must still be mirrored if the user
+      # changes history options before toggling.
+      zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY' || return 1
+    fi
 
     repeat 4; do
       zpty -w -n "$pty_name" $'\C-G' || return 1
       zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
     done
 
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- post-toggle-sync' || return 1
     zpty_send_command "$pty_name" "$prompt" "fc -l 1 > ${(q)snapshot}" || return 1
-    zpty -w "$pty_name" exit
+    zpty -w "$pty_name" exit || return 1
+    zpty_wait "$pty_name" || return 1
   } always {
     zpty -d "$pty_name" 2>/dev/null
   }
 
-  assert_text_line_count "$snapshot" 'seeded-toggle-marker' 1
+  legacy_history_file "$root" "$working_directory"
+  directory_history=$REPLY
+  assert_text_line_count "$snapshot" 'seeded-toggle-marker' 1 || return 1
+  assert_text_line_count "$root/global_history" 'seeded-toggle-marker' 1 || return 1
+  assert_text_line_count "$directory_history" 'seeded-toggle-marker' 1 || return 1
+  assert_text_line_count "$snapshot" 'legitimate-duplicate-marker' 2 || return 1
+  assert_text_line_count "$root/global_history" 'legitimate-duplicate-marker' 2 || return 1
+  assert_text_line_count "$directory_history" 'legitimate-duplicate-marker' 2
+}
+
+function test_repeated_toggles_do_not_duplicate_history() {
+  local option
+  local start_global
+
+  for option in INC_APPEND_HISTORY SHARE_HISTORY INC_APPEND_HISTORY_TIME APPEND_HISTORY; do
+    for start_global in false true; do
+      run_repeated_toggle_case "$option" "$start_global" || return 1
+    done
+  done
 }
 
 function print_captured_output() {
@@ -507,26 +763,37 @@ run_test 'persists history from concurrent shells' test_concurrent_shells_persis
 run_test 'honors history options and preserves whitespace' test_history_options_and_whitespace
 run_test 'keeps the shell usable with corrupt local history input' test_corrupt_history_does_not_block_commands
 
-run_expected_failure \
-  'binds the toggle in emacs, viins, and vicmd keymaps' \
-  test_all_keymaps_are_bound \
-  'the plugin binds only the active main keymap and vicmd'
-run_expected_failure \
-  'passes one intact argument to later zshaddhistory hooks' \
-  test_later_zshaddhistory_hook_receives_one_argument \
-  'fc -p triggers later hooks twice, with an empty argument on the second call'
-run_expected_failure \
+run_test \
+  'binds the toggle after switching from emacs to vi mode' \
+  test_all_keymaps_are_bound
+run_test \
+  'binds the toggle in a custom keymap aliased to main' \
+  test_custom_main_keymap_receives_binding
+run_test \
+  'passes one intact argument to later preexec hooks' \
+  test_later_preexec_hook_receives_one_argument
+run_test \
   'stores history for a directory named history' \
-  test_directory_named_history_has_its_own_history \
-  'the parent history file occupies the path needed for the child history directory'
+  test_directory_named_history_has_its_own_history
+run_test \
+  'keeps encoded history selected when a collision disappears and returns' \
+  test_encoded_history_stays_selected_after_collision_changes
+run_test \
+  'continues using pre-existing legacy history files' \
+  test_preexisting_legacy_history_remains_usable
+run_test \
+  'keeps nested history directories in distinct files' \
+  test_nested_history_directories_use_distinct_files
+run_test \
+  'encodes spaces and percent signs safely' \
+  test_encoded_history_handles_spaces_and_percent
 run_expected_failure \
   'makes new history immediately visible to concurrent shells' \
   test_concurrent_shells_share_live_history \
   'SHARE_HISTORY does not import another live shell history until reload or toggle'
-run_expected_failure \
+run_test \
   'does not duplicate commands across repeated local/global toggles' \
-  test_repeated_toggles_do_not_duplicate_history \
-  'ZLE toggle invocations duplicate existing entries in the active history buffer'
+  test_repeated_toggles_do_not_duplicate_history
 
 print
 print -r -- "$tests_passed passed, $tests_xfailed known failures, $tests_failed failed, $tests_xpassed unexpected passes"
