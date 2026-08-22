@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install zsh
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes zsh
+
+      - name: Show zsh version
+        run: zsh --version
+
+      - name: Check syntax
+        shell: zsh {0}
+        run: zsh -n per-directory-history.zsh tests/run.zsh
+
+      - name: Run tests
+        shell: zsh {0}
+        run: zsh tests/run.zsh
