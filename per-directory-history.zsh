@@ -89,7 +89,58 @@ bindkey "$PER_DIRECTORY_HISTORY_TOGGLE" per-directory-history-toggle-history
 # implementation details
 #-------------------------------------------------------------------------------
 
-_per_directory_history_directory="$HISTORY_BASE${PWD:A}/history"
+# Return the history file for a directory in REPLY.
+#
+# The original layout put a file named "history" below the directory-shaped
+# representation of PWD.  That means that a real directory named "history"
+# can collide with the history file for its parent.  Keep using the old path
+# when it is usable (and, in particular, when it already contains history),
+# but use an injective encoded path whenever that layout would collide.  The
+# percent sign is escaped first, so the encoding cannot introduce an
+# ambiguity; spaces and other characters are consequently safe as well.
+function _per-directory-history-file() {
+  local directory=${1:A}
+  local legacy="$HISTORY_BASE${directory}/history"
+  local encoded=${directory//\%/%25}
+  encoded=${encoded//\//%2F}
+  local encoded_file="$HISTORY_BASE/.history/$encoded"
+  local existing_parent=${legacy:h}
+
+  # If an old history file is an ancestor of the legacy parent, mkdir cannot
+  # create the legacy path.  Walk to the nearest existing ancestor so this
+  # also works for nested paths below a directory named history.
+  while [[ ! -e $existing_parent && $existing_parent != ${existing_parent:h} ]]; do
+    existing_parent=${existing_parent:h}
+  done
+
+  # Once a directory has used the encoded layout, keep using it even if the
+  # physical collision later disappears.  If both layouts exist, the encoded
+  # file wins so history cannot silently switch locations and orphan data.
+  if [[ -f $encoded_file ]]; then
+    REPLY=$encoded_file
+    return
+  fi
+
+  # Existing legacy files are preferred when no encoded history exists.  This
+  # avoids silently abandoning a user's existing history on upgrade.
+  if [[ -f $legacy && -d ${legacy:h} ]]; then
+    REPLY=$legacy
+    return
+  fi
+
+  # A directory named history needs the encoded layout.  Its parent may have
+  # an old history file at exactly the path needed as the child's directory;
+  # checking the legacy parent also handles arbitrary nesting of such paths.
+  if [[ ${directory:t} == history || -d "$directory/history" ||
+        ( -e $existing_parent && ! -d $existing_parent ) ]]; then
+    REPLY=$encoded_file
+  else
+    REPLY=$legacy
+  fi
+}
+
+_per-directory-history-file "$PWD"
+_per_directory_history_directory=$REPLY
 _per_directory_history_global_history="$HISTFILE"
 _per_directory_history_context_active=false
 _per_directory_history_active_history="$HISTFILE"
@@ -150,7 +201,8 @@ function _per-directory-history-switch-context() {
 }
 
 function _per-directory-history-change-directory() {
-  _per_directory_history_directory="$HISTORY_BASE${PWD:A}/history"
+  _per-directory-history-file "$PWD"
+  _per_directory_history_directory=$REPLY
   mkdir -p "${_per_directory_history_directory:h}"
   if [[ $_per_directory_history_is_global == false ]]; then
     _per-directory-history-switch-context "$_per_directory_history_directory"
