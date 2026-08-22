@@ -388,17 +388,36 @@ function test_all_keymaps_are_bound() {
   )
 }
 
-function test_later_zshaddhistory_hook_receives_one_argument() {
-  local root=$TEST_ROOT/later-hook
+function test_later_preexec_hook_receives_one_argument() {
+  local root=$TEST_ROOT/later-preexec-hook
   local working_directory=$root/work
   local captured=$root/captured-hook-arguments
-  local capture_function='function capture-hook() { print -r -- "$1" >> '"${(q)captured}"'; }'
-  mkdir -p -- "$working_directory"
+  local home=$root/home
+  local prompt=PDH_HOOK_READY
+  local pty_name=pdh-later-hook
+  local pty_output
+  mkdir -p -- "$working_directory" "$home"
+  zmodload zsh/zpty || return 1
 
-  run_session "$root" "$working_directory" later-hook \
-    "$capture_function" \
-    'add-zsh-hook zshaddhistory capture-hook' \
-    'print -r -- later-hook-marker' || return 1
+  {
+    zpty "$pty_name" env TERM=dumb HOME=${(q)home} PS1=${(q)prompt} zsh -dfi || return 1
+    zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
+
+    zpty_send_command "$pty_name" "$prompt" "HISTFILE=${(q)root}/global_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTSIZE=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'SAVEHIST=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" "HISTORY_BASE=${(q)root}/directory_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTORY_START_WITH_GLOBAL=false' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY' || return 1
+    zpty_send_command "$pty_name" "$prompt" "cd -- ${(q)working_directory}" || return 1
+    zpty_send_command "$pty_name" "$prompt" "source ${(q)PLUGIN}" || return 1
+    zpty_send_command "$pty_name" "$prompt" \
+      'function capture-preexec() { print -r -- "$1" >> '"${(q)captured}"'; }; add-zsh-hook preexec capture-preexec' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- later-hook-marker' || return 1
+    zpty -w "$pty_name" exit
+  } always {
+    zpty -d "$pty_name" 2>/dev/null
+  }
 
   assert_exact_line_count "$captured" 'print -r -- later-hook-marker' 1 || return 1
   assert_file_has_no_empty_lines "$captured"
@@ -511,10 +530,9 @@ run_expected_failure \
   'binds the toggle in emacs, viins, and vicmd keymaps' \
   test_all_keymaps_are_bound \
   'the plugin binds only the active main keymap and vicmd'
-run_expected_failure \
-  'passes one intact argument to later zshaddhistory hooks' \
-  test_later_zshaddhistory_hook_receives_one_argument \
-  'fc -p triggers later hooks twice, with an empty argument on the second call'
+run_test \
+  'passes one intact argument to later preexec hooks' \
+  test_later_preexec_hook_receives_one_argument
 run_expected_failure \
   'stores history for a directory named history' \
   test_directory_named_history_has_its_own_history \
