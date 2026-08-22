@@ -179,6 +179,16 @@ function zpty_send_command() {
   zpty -r -m "$name" output "*${prompt}*"
 }
 
+function zpty_wait() {
+  local name=$1
+  local output
+
+  while zpty -r "$name" output; do
+    true
+  done
+  return 0
+}
+
 function test_plugin_entrypoint_loads() {
   local root=$TEST_ROOT/plugin-entrypoint
   local working_directory=$root/work
@@ -421,14 +431,39 @@ function test_directory_named_history_has_its_own_history() {
   assert_file_contains_text "$child_history" 'child-history-marker'
 }
 
-function test_repeated_toggles_do_not_duplicate_history() {
-  local root=$TEST_ROOT/repeated-toggles
+function run_repeated_toggle_case() {
+  local option=$1
+  local start_global=$2
+  local case_name=${option:l}-${start_global:l}
+  local root=$TEST_ROOT/repeated-toggles/$case_name
   local working_directory=$root/work
   local home=$root/home
   local prompt=PDH_TEST_READY
-  local pty_name=pdh-toggle-shell
+  local pty_name=pdh-toggle-${case_name//[^[:alnum:]]/-}
   local snapshot=$root/active-history
+  local directory_history
   local pty_output
+  local option_command
+
+  case $option in
+    INC_APPEND_HISTORY)
+      option_command='setopt INC_APPEND_HISTORY'
+      ;;
+    SHARE_HISTORY)
+      option_command='setopt SHARE_HISTORY'
+      ;;
+    INC_APPEND_HISTORY_TIME)
+      option_command='setopt INC_APPEND_HISTORY_TIME'
+      ;;
+    APPEND_HISTORY)
+      option_command='setopt APPEND_HISTORY'
+      ;;
+    *)
+      fail "unknown history option: $option"
+      return 1
+      ;;
+  esac
+
   mkdir -p -- "$working_directory" "$home"
   zmodload zsh/zpty || return 1
 
@@ -440,26 +475,53 @@ function test_repeated_toggles_do_not_duplicate_history() {
     zpty_send_command "$pty_name" "$prompt" 'HISTSIZE=200' || return 1
     zpty_send_command "$pty_name" "$prompt" 'SAVEHIST=200' || return 1
     zpty_send_command "$pty_name" "$prompt" "HISTORY_BASE=${(q)root}/directory_history" || return 1
-    zpty_send_command "$pty_name" "$prompt" 'HISTORY_START_WITH_GLOBAL=false' || return 1
+    zpty_send_command "$pty_name" "$prompt" "HISTORY_START_WITH_GLOBAL=$start_global" || return 1
     zpty_send_command "$pty_name" "$prompt" "PER_DIRECTORY_HISTORY_TOGGLE='^G'" || return 1
-    zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY' || return 1
+    zpty_send_command "$pty_name" "$prompt" "$option_command" || return 1
     zpty_send_command "$pty_name" "$prompt" 'bindkey -e' || return 1
     zpty_send_command "$pty_name" "$prompt" "cd -- ${(q)working_directory}" || return 1
     zpty_send_command "$pty_name" "$prompt" "source ${(q)PLUGIN}" || return 1
     zpty_send_command "$pty_name" "$prompt" 'print -r -- seeded-toggle-marker' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- legitimate-duplicate-marker' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- legitimate-duplicate-marker' || return 1
+    if [[ $option == APPEND_HISTORY && $start_global == false ]]; then
+      # Pending APPEND_HISTORY entries must still be mirrored if the user
+      # changes history options before toggling.
+      zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY' || return 1
+    fi
 
     repeat 4; do
       zpty -w -n "$pty_name" $'\C-G' || return 1
       zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
     done
 
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- post-toggle-sync' || return 1
     zpty_send_command "$pty_name" "$prompt" "fc -l 1 > ${(q)snapshot}" || return 1
-    zpty -w "$pty_name" exit
+    zpty -w "$pty_name" exit || return 1
+    zpty_wait "$pty_name" || return 1
   } always {
     zpty -d "$pty_name" 2>/dev/null
   }
 
-  assert_text_line_count "$snapshot" 'seeded-toggle-marker' 1
+  local_history_file "$root" "$working_directory"
+  directory_history=$REPLY
+  assert_text_line_count "$snapshot" 'seeded-toggle-marker' 1 || return 1
+  assert_text_line_count "$root/global_history" 'seeded-toggle-marker' 1 || return 1
+  assert_text_line_count "$directory_history" 'seeded-toggle-marker' 1 || return 1
+  assert_text_line_count "$snapshot" 'legitimate-duplicate-marker' 2 || return 1
+  assert_text_line_count "$root/global_history" 'legitimate-duplicate-marker' 2 || return 1
+  assert_text_line_count "$directory_history" 'legitimate-duplicate-marker' 2
+}
+
+function test_repeated_toggles_do_not_duplicate_history() {
+  local option
+  local start_global
+
+  for option in INC_APPEND_HISTORY SHARE_HISTORY INC_APPEND_HISTORY_TIME APPEND_HISTORY; do
+    for start_global in false true; do
+      run_repeated_toggle_case "$option" "$start_global" || return 1
+    done
+  done
 }
 
 function print_captured_output() {
@@ -523,10 +585,9 @@ run_expected_failure \
   'makes new history immediately visible to concurrent shells' \
   test_concurrent_shells_share_live_history \
   'SHARE_HISTORY does not import another live shell history until reload or toggle'
-run_expected_failure \
+run_test \
   'does not duplicate commands across repeated local/global toggles' \
-  test_repeated_toggles_do_not_duplicate_history \
-  'ZLE toggle invocations duplicate existing entries in the active history buffer'
+  test_repeated_toggles_do_not_duplicate_history
 
 print
 print -r -- "$tests_passed passed, $tests_xfailed known failures, $tests_failed failed, $tests_xpassed unexpected passes"
