@@ -80,8 +80,10 @@ function per-directory-history-toggle-history() {
 
 autoload per-directory-history-toggle-history
 zle -N per-directory-history-toggle-history
-bindkey "$PER_DIRECTORY_HISTORY_TOGGLE" per-directory-history-toggle-history
+bindkey -M emacs "$PER_DIRECTORY_HISTORY_TOGGLE" per-directory-history-toggle-history
+bindkey -M viins "$PER_DIRECTORY_HISTORY_TOGGLE" per-directory-history-toggle-history
 bindkey -M vicmd "$PER_DIRECTORY_HISTORY_TOGGLE" per-directory-history-toggle-history
+bindkey "$PER_DIRECTORY_HISTORY_TOGGLE" per-directory-history-toggle-history
 
 #-------------------------------------------------------------------------------
 # implementation details

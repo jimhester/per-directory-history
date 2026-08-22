@@ -367,7 +367,45 @@ function test_all_keymaps_are_bound() {
 
   (
     emulate -L zsh
+    bindkey -e
+    HISTFILE=$root/global_history
+    HISTSIZE=50
+    SAVEHIST=50
+    HISTORY_BASE=$root/directory_history
+    HOME=$root/home
+    cd -- "$working_directory"
+    source "$PLUGIN"
     bindkey -v
+
+    local keymap
+    local binding
+    for keymap in viins vicmd; do
+      binding=$(bindkey -M "$keymap" "$PER_DIRECTORY_HISTORY_TOGGLE")
+      if [[ $binding != *'per-directory-history-toggle-history' ]]; then
+        fail "toggle is not bound in the active $keymap keymap after switching to vi mode: $binding"
+        return 1
+      fi
+    done
+
+    binding=$(bindkey -M emacs "$PER_DIRECTORY_HISTORY_TOGGLE")
+    if [[ $binding != *'per-directory-history-toggle-history' ]]; then
+      fail "toggle is not bound in the emacs keymap: $binding"
+      return 1
+    fi
+  )
+}
+
+function test_custom_main_keymap_receives_binding() {
+  local root=$TEST_ROOT/custom-main-keymap
+  local working_directory=$root/work
+  mkdir -p -- "$working_directory"
+
+  (
+    emulate -L zsh
+    bindkey -e
+    bindkey -N custom-main emacs
+    bindkey -A custom-main main
+    PER_DIRECTORY_HISTORY_TOGGLE='^X'
     HISTFILE=$root/global_history
     HISTSIZE=50
     SAVEHIST=50
@@ -376,15 +414,12 @@ function test_all_keymaps_are_bound() {
     cd -- "$working_directory"
     source "$PLUGIN"
 
-    local keymap
     local binding
-    for keymap in emacs viins vicmd; do
-      binding=$(bindkey -M "$keymap" "$PER_DIRECTORY_HISTORY_TOGGLE")
-      if [[ $binding != *'per-directory-history-toggle-history' ]]; then
-        fail "toggle is not bound in the $keymap keymap: $binding"
-        return 1
-      fi
-    done
+    binding=$(bindkey -M custom-main "$PER_DIRECTORY_HISTORY_TOGGLE")
+    if [[ $binding != *'per-directory-history-toggle-history' ]]; then
+      fail "toggle is not bound in the custom keymap aliased to main: $binding"
+      return 1
+    fi
   )
 }
 
@@ -507,10 +542,12 @@ run_test 'persists history from concurrent shells' test_concurrent_shells_persis
 run_test 'honors history options and preserves whitespace' test_history_options_and_whitespace
 run_test 'keeps the shell usable with corrupt local history input' test_corrupt_history_does_not_block_commands
 
-run_expected_failure \
-  'binds the toggle in emacs, viins, and vicmd keymaps' \
-  test_all_keymaps_are_bound \
-  'the plugin binds only the active main keymap and vicmd'
+run_test \
+  'binds the toggle after switching from emacs to vi mode' \
+  test_all_keymaps_are_bound
+run_test \
+  'binds the toggle in a custom keymap aliased to main' \
+  test_custom_main_keymap_receives_binding
 run_expected_failure \
   'passes one intact argument to later zshaddhistory hooks' \
   test_later_zshaddhistory_hook_receives_one_argument \
