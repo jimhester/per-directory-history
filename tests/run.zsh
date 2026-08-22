@@ -507,10 +507,9 @@ run_test 'persists history from concurrent shells' test_concurrent_shells_persis
 run_test 'honors history options and preserves whitespace' test_history_options_and_whitespace
 run_test 'keeps the shell usable with corrupt local history input' test_corrupt_history_does_not_block_commands
 
-run_expected_failure \
+run_test \
   'binds the toggle in emacs, viins, and vicmd keymaps' \
-  test_all_keymaps_are_bound \
-  'the plugin binds only the active main keymap and vicmd'
+  test_all_keymaps_are_bound
 run_expected_failure \
   'passes one intact argument to later zshaddhistory hooks' \
   test_later_zshaddhistory_hook_receives_one_argument \
