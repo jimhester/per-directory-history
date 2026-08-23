@@ -121,7 +121,7 @@ function assert_file_has_no_empty_lines() {
   assert_file_exists "$file" || return 1
   while IFS= read -r line; do
     if [[ -z $line ]]; then
-      fail "expected $file not to contain an empty hook argument"
+      fail "expected $file not to contain an empty line"
       return 1
     fi
   done < "$file"
@@ -401,16 +401,18 @@ function test_concurrent_shells_share_live_history() {
   assert_text_line_count "$snapshot" 'live-shell-b-marker' 1
 }
 
-function test_history_options_and_whitespace() {
+function test_blank_history_entries_and_whitespace() {
   local root="$TEST_ROOT/options and whitespace"
   local working_directory="$root/work area"
-  local preserved_command='print -r -- whitespace-marker     '
+  local preserved_command=' print -r -- whitespace-marker     '
   mkdir -p -- "$working_directory"
 
+  # Reproduce a blank command passed directly to the history hook.
   run_session "$root" "$working_directory" whitespace \
     'setopt SH_WORD_SPLIT' \
-    'setopt HIST_IGNORE_SPACE' \
     "$preserved_command" \
+    'setopt HIST_IGNORE_SPACE' \
+    "_per-directory-history-addhistory \$'\\n'" \
     ' print -r -- ignored-space-marker' || return 1
 
   local directory_history
@@ -421,6 +423,7 @@ function test_history_options_and_whitespace() {
   for file in "$root/global_history" "$directory_history"; do
     assert_file_contains_exact_line "$file" "$preserved_command" || return 1
     assert_file_not_contains_text "$file" 'ignored-space-marker' || return 1
+    assert_file_has_no_empty_lines "$file" || return 1
   done
 }
 
@@ -1207,7 +1210,9 @@ run_test \
   'keeps directory history aligned after a mirror append failure' \
   test_failed_mirror_does_not_block_directory_switch
 run_test 'persists history from concurrent shells' test_concurrent_shells_persist_history
-run_test 'honors history options and preserves whitespace' test_history_options_and_whitespace
+run_test \
+  'ignores blank history entries and preserves command whitespace' \
+  test_blank_history_entries_and_whitespace
 run_test 'keeps the shell usable with corrupt local history input' test_corrupt_history_does_not_block_commands
 
 run_test \
