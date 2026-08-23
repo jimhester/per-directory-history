@@ -788,6 +788,39 @@ function test_runtime_history_limit_changes_preserve_inactive_history() {
   run_runtime_limit_exit_case same-line-exit
 }
 
+function test_same_line_limit_reduction_bounds_inactive_history() {
+  local root=$TEST_ROOT/runtime-history-limits/same-line-reduction
+  local working_directory=$root/work
+  local home=$root/home
+  local global_history=$root/global_history
+  local -i sentinel
+
+  mkdir -p -- "$working_directory" "$home"
+  for sentinel in {1..12}; do
+    print -r -- "runtime-reduction-global-sentinel-$sentinel"
+  done > "$global_history"
+
+  {
+    print -r -- "PROMPT=''"
+    print -r -- "HISTFILE=${(q)global_history}"
+    print -r -- 'HISTSIZE=200'
+    print -r -- 'SAVEHIST=200'
+    print -r -- "HISTORY_BASE=${(q)root}/directory_history"
+    print -r -- 'HISTORY_START_WITH_GLOBAL=false'
+    print -r -- 'unsetopt INC_APPEND_HISTORY INC_APPEND_HISTORY_TIME SHARE_HISTORY'
+    print -r -- 'setopt APPEND_HISTORY'
+    print -r -- "cd -- ${(q)working_directory}"
+    print -r -- "source ${(q)PLUGIN}"
+  } > "$home/.zshrc"
+
+  print -r -- 'SAVEHIST=4; exit' |
+    env TERM=dumb HOME="$home" ZDOTDIR="$home" zsh -di \
+      > "$root/session.stdout" 2> "$root/session.stderr" || return 1
+
+  assert_file_line_count_at_most "$global_history" 4 || return 1
+  assert_text_line_count "$global_history" 'SAVEHIST=4; exit' 1
+}
+
 function run_ksh_arrays_pending_case() {
   local option=$1
   local start_global=$2
@@ -1147,6 +1180,9 @@ run_test \
 run_test \
   'uses runtime history-limit changes for the final inactive mirror' \
   test_runtime_history_limit_changes_preserve_inactive_history
+run_test \
+  'uses a same-line SAVEHIST reduction to bound the final mirror' \
+  test_same_line_limit_reduction_bounds_inactive_history
 run_test \
   'preserves delayed mirrors when KSH_ARRAYS is enabled' \
   test_ksh_arrays_preserves_all_pending_history
