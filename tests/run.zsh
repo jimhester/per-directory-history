@@ -231,18 +231,29 @@ function zpty_wait() {
 
 function test_plugin_entrypoint_loads() {
   local root=$TEST_ROOT/plugin-entrypoint
+  local plugin_directory="$root/plugin install with spaces"
+  local plugin_entrypoint=$plugin_directory/per-directory-history.plugin.zsh
   local working_directory=$root/work
-  mkdir -p -- "$working_directory"
+
+  [[ -f $PLUGIN_ENTRYPOINT && ! -h $PLUGIN_ENTRYPOINT ]] ||
+    { fail 'plugin entrypoint must be a regular file, not a symlink'; return 1 }
+  [[ "$(<$PLUGIN_ENTRYPOINT)" != per-directory-history.zsh ]] ||
+    { fail 'plugin entrypoint contains an unresolved symlink target'; return 1 }
+
+  mkdir -p -- "$plugin_directory" "$working_directory"
+  cp -- "$PLUGIN" "$plugin_directory/per-directory-history.zsh" || return 1
+  cp -- "$PLUGIN_ENTRYPOINT" "$plugin_entrypoint" || return 1
 
   (
     emulate -L zsh
+    setopt SH_WORD_SPLIT
     HISTFILE=$root/global_history
     HISTSIZE=50
     SAVEHIST=50
     HISTORY_BASE=$root/directory_history
     HOME=$root/home
     cd -- "$working_directory"
-    source "$PLUGIN_ENTRYPOINT"
+    source "$plugin_entrypoint"
 
     (( $+functions[_per-directory-history-addhistory] )) ||
       { fail 'plugin entrypoint did not define the history hook'; return 1 }
