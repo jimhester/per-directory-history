@@ -293,17 +293,21 @@ function _per-directory-history-change-directory() {
 function _per-directory-history-addhistory() {
   setopt local_options no_ksh_arrays
 
+  local command="${1%%$'\n'}"
+
   # Keep the active context's limits available after zsh saves and pops that
   # context on exit, restoring the protected base context with SAVEHIST=0.
   (( HISTSIZE > 0 )) && _per_directory_history_active_histsize=$HISTSIZE
   (( SAVEHIST > 0 )) && _per_directory_history_active_savehist=$SAVEHIST
-  _per-directory-history-cache-literal-limits "$1"
+  _per-directory-history-cache-literal-limits "$command"
+
+  [[ -z "$command" ]] && return 0
 
   # respect hist_ignore_space
-  if [[ -o hist_ignore_space ]] && [[ "$1" == \ * ]]; then
+  if [[ -o hist_ignore_space ]] && [[ "$command" == \ * ]]; then
       true
   else
-      print -Sr -- "${1%%$'\n'}"
+      print -Sr -- "$command"
       local inactive_history
       if [[ $_per_directory_history_is_global == true ]]; then
         inactive_history=$_per_directory_history_directory
@@ -315,7 +319,7 @@ function _per-directory-history-addhistory() {
       if [[ ! -o share_history &&
             ! -o inc_append_history &&
             ! -o inc_append_history_time ]]; then
-        _per_directory_history_pending_commands+=("${1%%$'\n'}")
+        _per_directory_history_pending_commands+=("$command")
         _per_directory_history_pending_histories+=("$inactive_history")
       elif [[ -o share_history ]] || \
          [[ -o inc_append_history ]] || \
