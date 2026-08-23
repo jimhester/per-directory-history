@@ -150,8 +150,9 @@ typeset -ga _per_directory_history_pending_commands
 typeset -ga _per_directory_history_pending_histories
 
 function _per-directory-history-append-pending() {
+  setopt local_options no_ksh_arrays
+
   local target=$1
-  local preserve_existing=${2:-false}
   local line
   local -i index
   local -a append_commands
@@ -170,14 +171,6 @@ function _per-directory-history-append-pending() {
 
   local -i context_histsize=$_per_directory_history_active_histsize
   local -i context_savehist=$_per_directory_history_active_savehist
-  if [[ $preserve_existing == true ]]; then
-    # No hook runs after every possible command form (for example,
-    # SAVEHIST=...; exit).  Avoid trimming the destination with a stale limit
-    # during the final mirror.  A later active context can apply configured
-    # trimming without risking existing entries during this append.
-    context_histsize=2147483647
-    context_savehist=2147483647
-  fi
 
   # Isolate the temporary context because some fc errors unwind the current
   # hook before ordinary status handling can run.  A failed append then exits
@@ -204,24 +197,28 @@ function _per-directory-history-append-pending() {
 }
 
 function _per-directory-history-flush-pending() {
-  local preserve_existing=${1:-false}
+  setopt local_options no_ksh_arrays
+
   local target
   local -a targets=("${(u)_per_directory_history_pending_histories[@]}")
   local -i failures=0
 
   for target in "${targets[@]}"; do
-    _per-directory-history-append-pending \
-      "$target" "$preserve_existing" || (( ++failures ))
+    _per-directory-history-append-pending "$target" || (( ++failures ))
   done
   (( failures == 0 ))
 }
 
 function _per-directory-history-switch-context() {
+  setopt local_options no_ksh_arrays
+
   local target=$1
   local original_histsize=$HISTSIZE
   local original_savehist=$SAVEHIST
-  _per_directory_history_active_histsize=$original_histsize
-  _per_directory_history_active_savehist=$original_savehist
+  (( original_histsize > 0 )) &&
+    _per_directory_history_active_histsize=$original_histsize
+  (( original_savehist > 0 )) &&
+    _per_directory_history_active_savehist=$original_savehist
 
   if [[ $_per_directory_history_context_active == true ]]; then
     # Only append entries created in this context.  Suppress fc -P's normal
@@ -250,6 +247,38 @@ function _per-directory-history-switch-context() {
   _per_directory_history_context_active=true
 }
 
+# zshaddhistory runs before a command is executed.  Usually the following
+# precmd refreshes the cached limits, but an assignment followed by exit on the
+# same input line has no next prompt.  Anticipate simple, literal assignment
+# commands so that final mirrors use the values zsh itself will use when saving
+# the active context.  More complex commands are left for precmd to observe.
+function _per-directory-history-cache-literal-limits() {
+  setopt local_options no_ksh_arrays
+
+  local command=${1%%$'\n'}
+  local word
+  local -a words=( "${(@z)command}" )
+  local -i histsize=-1
+  local -i savehist=-1
+
+  for word in "${words[@]}"; do
+    [[ $word == ';' ]] && break
+    word=${(Q)word}
+    if [[ $word == HISTSIZE=<-> ]]; then
+      histsize=${word#HISTSIZE=}
+    elif [[ $word == SAVEHIST=<-> ]]; then
+      savehist=${word#SAVEHIST=}
+    else
+      return 0
+    fi
+  done
+
+  (( histsize > 0 )) &&
+    _per_directory_history_active_histsize=$histsize
+  (( savehist > 0 )) &&
+    _per_directory_history_active_savehist=$savehist
+}
+
 function _per-directory-history-change-directory() {
   local target
   _per-directory-history-file "$PWD"
@@ -262,10 +291,13 @@ function _per-directory-history-change-directory() {
 }
 
 function _per-directory-history-addhistory() {
+  setopt local_options no_ksh_arrays
+
   # Keep the active context's limits available after zsh saves and pops that
   # context on exit, restoring the protected base context with SAVEHIST=0.
-  _per_directory_history_active_histsize=$HISTSIZE
-  _per_directory_history_active_savehist=$SAVEHIST
+  (( HISTSIZE > 0 )) && _per_directory_history_active_histsize=$HISTSIZE
+  (( SAVEHIST > 0 )) && _per_directory_history_active_savehist=$SAVEHIST
+  _per-directory-history-cache-literal-limits "$1"
 
   # respect hist_ignore_space
   if [[ -o hist_ignore_space ]] && [[ "$1" == \ * ]]; then
@@ -295,13 +327,14 @@ function _per-directory-history-addhistory() {
 }
 
 function _per-directory-history-exit() {
+  setopt local_options no_ksh_arrays
+
   # zsh has already saved and popped the active fc -p context by zshexit, so
-  # only pending mirrors to inactive histories remain to be written.  The
-  # unbounded temporary context prevents a stale pre-command limit from
-  # trimming those destinations during the final append.
+  # only pending mirrors to inactive histories remain to be written.  Cached
+  # active limits keep this final append subject to the configured bounds.
   if [[ $_per_directory_history_context_active == true ]] &&
       (( $#_per_directory_history_pending_commands )); then
-    _per-directory-history-flush-pending true
+    _per-directory-history-flush-pending
   fi
 }
 
@@ -319,8 +352,8 @@ function _per-directory-history-precmd() {
   else
     # precmd observes limit changes made by the command that just completed;
     # zshaddhistory runs before that command and cannot see them yet.
-    _per_directory_history_active_histsize=$HISTSIZE
-    _per_directory_history_active_savehist=$SAVEHIST
+    (( HISTSIZE > 0 )) && _per_directory_history_active_histsize=$HISTSIZE
+    (( SAVEHIST > 0 )) && _per_directory_history_active_savehist=$SAVEHIST
 
     if [[ -o share_history ]]; then
       # History contexts created with fc -p do not reliably resume zsh's

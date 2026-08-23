@@ -127,6 +127,20 @@ function assert_file_has_no_empty_lines() {
   done < "$file"
 }
 
+function assert_file_line_count_at_most() {
+  local file=$1
+  local maximum=$2
+  local line
+  local -i count=0
+
+  assert_file_exists "$file" || return 1
+  while IFS= read -r line; do
+    (( ++count ))
+  done < "$file"
+  (( count <= maximum )) ||
+    fail "expected $file to contain at most $maximum lines, found $count"
+}
+
 # Start a real interactive zsh so zshaddhistory, precmd, and chpwd run in the
 # same order they do for users. Each argument after the id is one input line.
 function run_session() {
@@ -774,6 +788,126 @@ function test_runtime_history_limit_changes_preserve_inactive_history() {
   run_runtime_limit_exit_case same-line-exit
 }
 
+function run_ksh_arrays_pending_case() {
+  local option=$1
+  local start_global=$2
+  local case_name=${option:l}-${start_global:l}
+  local root=$TEST_ROOT/ksh-arrays-pending/$case_name
+  local working_directory=$root/work
+  local home=$root/home
+  local global_history=$root/global_history
+  local directory_history
+  local option_command
+  local first_marker=ksh-arrays-first-$case_name
+  local second_marker=ksh-arrays-second-$case_name
+
+  mkdir -p -- "$working_directory" "$home"
+  legacy_history_file "$root" "$working_directory"
+  directory_history=$REPLY
+  mkdir -p -- "${directory_history:h}"
+  print -r -- 'ksh-arrays-global-sentinel' > "$global_history"
+  print -r -- 'ksh-arrays-local-sentinel' > "$directory_history"
+
+  history_option_command "$option" || return 1
+  option_command=$REPLY
+  {
+    print -r -- "PROMPT=''"
+    print -r -- "HISTFILE=${(q)global_history}"
+    print -r -- 'HISTSIZE=20'
+    print -r -- 'SAVEHIST=20'
+    print -r -- "HISTORY_BASE=${(q)root}/directory_history"
+    print -r -- "HISTORY_START_WITH_GLOBAL=$start_global"
+    print -r -- "$option_command"
+    print -r -- 'setopt KSH_ARRAYS'
+    print -r -- "cd -- ${(q)working_directory}"
+    print -r -- "source ${(q)PLUGIN}"
+  } > "$home/.zshrc"
+
+  {
+    print -r -- "print -r -- $first_marker"
+    print -r -- "print -r -- $second_marker"
+    print -r -- 'exit'
+  } | env TERM=dumb HOME="$home" ZDOTDIR="$home" zsh -di \
+      > "$root/session.stdout" 2> "$root/session.stderr" || return 1
+
+  local file
+  for file in "$global_history" "$directory_history"; do
+    assert_text_line_count "$file" "$first_marker" 1 || return 1
+    assert_text_line_count "$file" "$second_marker" 1 || return 1
+  done
+}
+
+function test_ksh_arrays_preserves_all_pending_history() {
+  local option
+  local start_global
+
+  for option in NONE APPEND_HISTORY; do
+    for start_global in false true; do
+      run_ksh_arrays_pending_case "$option" "$start_global" || return 1
+    done
+  done
+}
+
+function run_bounded_final_mirror_case() {
+  local start_global=$1
+  local root=$TEST_ROOT/bounded-final-mirrors/$start_global
+  local working_directory=$root/work
+  local home=$root/home
+  local global_history=$root/global_history
+  local directory_history
+  local inactive_history
+  local marker
+  local -i session
+
+  mkdir -p -- "$working_directory" "$home"
+  legacy_history_file "$root" "$working_directory"
+  directory_history=$REPLY
+  mkdir -p -- "${directory_history:h}"
+  for session in {1..5}; do
+    print -r -- "bounded-local-sentinel-$session"
+  done > "$directory_history"
+  for session in {1..5}; do
+    print -r -- "bounded-global-sentinel-$session"
+  done > "$global_history"
+
+  if [[ $start_global == true ]]; then
+    inactive_history=$directory_history
+  else
+    inactive_history=$global_history
+  fi
+
+  {
+    print -r -- "PROMPT=''"
+    print -r -- "HISTFILE=${(q)global_history}"
+    print -r -- 'HISTSIZE=5'
+    print -r -- 'SAVEHIST=5'
+    print -r -- "HISTORY_BASE=${(q)root}/directory_history"
+    print -r -- "HISTORY_START_WITH_GLOBAL=$start_global"
+    print -r -- 'unsetopt INC_APPEND_HISTORY INC_APPEND_HISTORY_TIME SHARE_HISTORY'
+    print -r -- 'setopt APPEND_HISTORY'
+    print -r -- "cd -- ${(q)working_directory}"
+    print -r -- "source ${(q)PLUGIN}"
+  } > "$home/.zshrc"
+
+  for session in {1..4}; do
+    marker=bounded-final-marker-$session
+    {
+      print -r -- "print -r -- $marker"
+      print -r -- 'exit'
+    } | env TERM=dumb HOME="$home" ZDOTDIR="$home" zsh -di \
+        > "$root/session-$session.stdout" \
+        2> "$root/session-$session.stderr" || return 1
+  done
+
+  assert_file_line_count_at_most "$inactive_history" 5 || return 1
+  assert_text_line_count "$inactive_history" 'bounded-final-marker-4' 1
+}
+
+function test_final_inactive_mirrors_respect_savehist() {
+  run_bounded_final_mirror_case false || return 1
+  run_bounded_final_mirror_case true
+}
+
 function run_global_directory_routing_case() {
   local option=$1
   local root=$TEST_ROOT/global-directory-routing/${option:l}
@@ -1013,6 +1147,12 @@ run_test \
 run_test \
   'uses runtime history-limit changes for the final inactive mirror' \
   test_runtime_history_limit_changes_preserve_inactive_history
+run_test \
+  'preserves delayed mirrors when KSH_ARRAYS is enabled' \
+  test_ksh_arrays_preserves_all_pending_history
+run_test \
+  'bounds final inactive mirrors by SAVEHIST' \
+  test_final_inactive_mirrors_respect_savehist
 run_test \
   'routes global-mode pending history to its original directory' \
   test_global_mode_routes_pending_history_by_directory
