@@ -148,6 +148,39 @@ typeset -gi _per_directory_history_active_histsize=$HISTSIZE
 typeset -gi _per_directory_history_active_savehist=$SAVEHIST
 typeset -ga _per_directory_history_pending_commands
 typeset -ga _per_directory_history_pending_histories
+typeset -gA _per_directory_history_file_signatures
+
+zmodload -F zsh/stat b:zstat
+
+function _per-directory-history-record-file-signature() {
+  local file=$1
+  local -A file_stat
+
+  if zstat -H file_stat -F '%s.%N' -- "$file" 2>/dev/null; then
+    _per_directory_history_file_signatures[$file]="${file_stat[device]}:${file_stat[inode]}:${file_stat[size]}:${file_stat[mtime]}:${file_stat[ctime]}"
+  else
+    unset "_per_directory_history_file_signatures[$file]"
+  fi
+}
+
+function _per-directory-history-file-changed() {
+  local file=$1
+  local previous=${_per_directory_history_file_signatures[$file]-}
+
+  _per-directory-history-record-file-signature "$file"
+  [[ ${_per_directory_history_file_signatures[$file]-} != $previous ]]
+}
+
+function _per-directory-history-import-file-changes() {
+  if [[ -o share_history ]] &&
+      _per-directory-history-file-changed "$HISTFILE"; then
+    # Disable SHARE_HISTORY while using zsh's documented manual import mode.
+    # The local option scope restores the user's setting after this hook.
+    setopt local_options
+    unsetopt share_history
+    fc -RI "$HISTFILE"
+  fi
+}
 
 function _per-directory-history-append-pending() {
   setopt local_options no_ksh_arrays
@@ -245,6 +278,7 @@ function _per-directory-history-switch-context() {
   fc -p "$target" "$original_histsize" "$original_savehist"
   _per_directory_history_active_history=$target
   _per_directory_history_context_active=true
+  _per-directory-history-record-file-signature "$target"
 }
 
 # zshaddhistory runs before a command is executed.  Usually the following
@@ -359,14 +393,18 @@ function _per-directory-history-precmd() {
     (( HISTSIZE > 0 )) && _per_directory_history_active_histsize=$HISTSIZE
     (( SAVEHIST > 0 )) && _per_directory_history_active_savehist=$SAVEHIST
 
-    if [[ -o share_history ]]; then
-      # History contexts created with fc -p do not reliably resume zsh's
-      # automatic SHARE_HISTORY import.  Incrementally read the active file at
-      # each prompt so commands from other live shells become visible without
-      # a toggle or reload.  -I imports only events not already in this context.
-      fc -RI "$HISTFILE"
-    fi
+    # The preexec hook recorded the file after this shell appended its command,
+    # so a change here came from another shell while the command was running.
+    _per-directory-history-import-file-changes
   fi
+}
+
+function _per-directory-history-preexec() {
+  # zsh writes the new local event before preexec.  Import here before
+  # acknowledging that write, so external entries added while ZLE was active
+  # cannot be hidden by this shell's append.  Importing before command execution
+  # also leaves ZLE with a valid current event at the next prompt.
+  _per-directory-history-import-file-changes
 }
 
 function _per-directory-history-set-directory-history() {
@@ -384,6 +422,7 @@ autoload -U add-zsh-hook
 add-zsh-hook chpwd _per-directory-history-change-directory
 add-zsh-hook zshaddhistory _per-directory-history-addhistory
 add-zsh-hook precmd _per-directory-history-precmd
+add-zsh-hook preexec _per-directory-history-preexec
 add-zsh-hook zshexit _per-directory-history-exit
 
 # set initialized flag to false
