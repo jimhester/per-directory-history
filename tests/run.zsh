@@ -1147,6 +1147,89 @@ function test_repeated_toggles_do_not_duplicate_history() {
   done
 }
 
+function test_share_history_preserves_up_line_navigation() {
+  local root=$TEST_ROOT/share-history-up-line
+  local working_directory=$root/work
+  local home=$root/home
+  local prompt=PDH_UP_LINE_READY
+  local pty_name=pdh-share-history-up-line
+  local captured=$root/up-line-buffer
+  local pty_output
+
+  mkdir -p -- "$working_directory" "$home"
+  zmodload zsh/zpty || return 1
+
+  {
+    zpty "$pty_name" env TERM=dumb HOME=${(q)home} PS1=${(q)prompt} zsh -dfi || return 1
+    zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
+
+    zpty_send_command "$pty_name" "$prompt" "HISTFILE=${(q)root}/global_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTSIZE=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'SAVEHIST=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" "HISTORY_BASE=${(q)root}/directory_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTORY_START_WITH_GLOBAL=false' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY SHARE_HISTORY HIST_IGNORE_SPACE' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'bindkey -e' || return 1
+    zpty_send_command "$pty_name" "$prompt" "cd -- ${(q)working_directory}" || return 1
+    zpty_send_command "$pty_name" "$prompt" "source ${(q)PLUGIN}" || return 1
+    zpty_send_command "$pty_name" "$prompt" \
+      ' function capture-up-line() { zle up-line-or-history; print -r -- "$BUFFER" > '"${(q)captured}"'; zle send-break; }; zle -N capture-up-line; bindkey "^P" capture-up-line' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'print -r -- share-history-up-line-marker' || return 1
+
+    zpty -w -n "$pty_name" $'\C-P' || return 1
+    zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
+    zpty -w "$pty_name" exit || return 1
+    zpty_wait "$pty_name" || return 1
+  } always {
+    zpty -d "$pty_name" 2>/dev/null
+  }
+
+  [[ -f $captured ]] ||
+    { fail 'up-line-or-history widget did not capture a buffer'; return 1 }
+  [[ "$(<$captured)" == 'print -r -- share-history-up-line-marker' ]] ||
+    fail "expected up-line-or-history to recall the latest command, found: $(<$captured)"
+}
+
+function test_share_history_imports_before_next_command() {
+  local root=$TEST_ROOT/share-history-before-next-command
+  local working_directory=$root/work
+  local home=$root/home
+  local prompt=PDH_IMPORT_READY
+  local pty_name=pdh-share-history-import
+  local snapshot=$root/active-history
+  local pty_output
+
+  mkdir -p -- "$working_directory" "$home"
+  zmodload zsh/zpty || return 1
+
+  {
+    zpty "$pty_name" env TERM=dumb HOME=${(q)home} PS1=${(q)prompt} zsh -dfi || return 1
+    zpty -r -m "$pty_name" pty_output "*${prompt}*" || return 1
+
+    zpty_send_command "$pty_name" "$prompt" "HISTFILE=${(q)root}/global_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTSIZE=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'SAVEHIST=200' || return 1
+    zpty_send_command "$pty_name" "$prompt" "HISTORY_BASE=${(q)root}/directory_history" || return 1
+    zpty_send_command "$pty_name" "$prompt" 'HISTORY_START_WITH_GLOBAL=false' || return 1
+    zpty_send_command "$pty_name" "$prompt" 'setopt INC_APPEND_HISTORY SHARE_HISTORY' || return 1
+    zpty_send_command "$pty_name" "$prompt" "cd -- ${(q)working_directory}" || return 1
+    zpty_send_command "$pty_name" "$prompt" "source ${(q)PLUGIN}" || return 1
+
+    run_session "$root" "$working_directory" external-writer \
+      'setopt SHARE_HISTORY' \
+      'print -r -- share-history-external-before-command' || return 1
+
+    zpty_send_command "$pty_name" "$prompt" "fc -l 1 > ${(q)snapshot}" || return 1
+    zpty -w "$pty_name" exit || return 1
+    zpty_wait "$pty_name" || return 1
+  } always {
+    zpty -d "$pty_name" 2>/dev/null
+  }
+
+  assert_text_line_count "$snapshot" \
+    'share-history-external-before-command' 1
+}
+
 function print_captured_output() {
   local output=$1
   [[ -n $output ]] || return 0
@@ -1245,6 +1328,12 @@ run_test \
 run_test \
   'does not duplicate commands across repeated local/global toggles' \
   test_repeated_toggles_do_not_duplicate_history
+run_test \
+  'keeps up-line-or-history working with SHARE_HISTORY' \
+  test_share_history_preserves_up_line_navigation
+run_test \
+  'imports SHARE_HISTORY writes before the next command' \
+  test_share_history_imports_before_next_command
 
 print
 print -r -- "$tests_passed passed, $tests_xfailed known failures, $tests_failed failed, $tests_xpassed unexpected passes"
